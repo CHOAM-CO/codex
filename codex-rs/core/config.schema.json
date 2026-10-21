@@ -2894,6 +2894,10 @@
           "description": "Additional HTTP headers to include in requests to this provider where the (key, value) pairs are the header name and value.",
           "type": "object"
         },
+        "input_tokens_endpoint": {
+          "description": "Optional endpoint implementing the Responses input-token count contract. A relative path is appended to `base_url`; an absolute URL is used directly. When unset, Codex uses its existing context-token estimate.",
+          "type": "string"
+        },
         "model_catalog_url": {
           "description": "Optional full URL for a Codex-native model catalog. When unset, OpenAI discovery uses the Codex backend unless `base_url` overrides the inference endpoint.",
           "type": "string"

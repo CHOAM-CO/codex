@@ -1809,6 +1809,22 @@ impl ModelProvider for TestRecoveryProvider {
         self.inner.account_state()
     }
 
+    fn api_auth(
+        &self,
+    ) -> ModelProviderFuture<'_, codex_protocol::error::Result<codex_api::SharedAuthProvider>> {
+        Box::pin(async move {
+            let token = if self.attempts.load(Ordering::Relaxed) == 0 {
+                "expired-token"
+            } else {
+                "refreshed-token"
+            };
+            Ok(Arc::new(BearerAuthProvider::for_test(
+                Some(token),
+                /*account_id*/ None,
+            )) as codex_api::SharedAuthProvider)
+        })
+    }
+
     fn auth_recovery_messages(&self) -> Option<ProviderAuthRecoveryMessages> {
         Some(ProviderAuthRecoveryMessages {
             started: "Refreshing provider authentication.",
@@ -2430,5 +2446,412 @@ fn provider_switch_converts_forked_history_only_for_the_target_request() -> anyh
             );
         }
     }
+    Ok(())
+}
+
+#[test_case::test_case(false; "raw response tools")]
+#[test_case::test_case(true; "responses lite tool prefix")]
+#[tokio::test]
+async fn input_token_count_matches_generation_and_keeps_full_websocket_context(
+    responses_lite: bool,
+) -> anyhow::Result<()> {
+    use codex_model_provider_info::ModelProviderCapabilities;
+    use codex_protocol::config_types::ReasoningSummary;
+    use codex_protocol::provider_history::UNAVAILABLE_ENCRYPTED_CONTENT;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses/input_tokens"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "response.input_tokens", "input_tokens": 617
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(concat!(
+                    "data: {\"type\":\"response.created\",\"response\":{\"id\":\"counted-response\"}}\n\n",
+                    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"counted-response\"}}\n\n",
+                )),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut provider =
+        create_oss_provider_with_base_url(&format!("{}/v1", server.uri()), WireApi::Responses);
+    provider.input_tokens_endpoint = Some("responses/input_tokens".to_owned());
+    provider.supports_websockets = false;
+    provider.capabilities = Some(ModelProviderCapabilities {
+        encrypted_content: Some(false),
+        ..Default::default()
+    });
+    let mut client = test_model_client(SessionSource::Cli);
+    Arc::get_mut(&mut client.state).unwrap().provider = create_model_provider(provider, None);
+    let metadata = test_responses_metadata_for_client(
+        &client,
+        None,
+        format!("{}:0", client.state.thread_id),
+        None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+    let mut model = test_model_info();
+    model.slug = "counted-model".to_owned();
+    model.use_responses_lite = responses_lite;
+    model.supports_reasoning_summary_parameter = true;
+    let tool_schema = json!({
+        "type": "object",
+        "properties": {"query": {"type": "string", "description": "Unabridged query schema"}},
+        "required": ["query"],
+        "additionalProperties": false
+    });
+    let tools = vec![ToolSpec::Function(ResponsesApiTool {
+        name: "inspect_record".to_owned(),
+        description: "Read the selected record.".to_owned(),
+        strict: true,
+        defer_loading: None,
+        parameters: serde_json::from_value(tool_schema.clone())?,
+        output_schema: None,
+    })];
+    let inherited: Vec<ResponseItem> = serde_json::from_value(json!([
+        {"type":"reasoning", "summary":[{"type":"summary_text","text":"Readable source summary"}], "encrypted_content":"opaque-reasoning"},
+        {"type":"compaction", "encrypted_content":"opaque-compaction"},
+        {"type":"function_call_output", "call_id":"source-call", "output":[
+            {"type":"input_text","text":"{\"encrypted_content\":\"ordinary tool data\"}"},
+            {"type":"encrypted_content","encrypted_content":"opaque-tool-result"}
+        ]},
+        {"type":"message", "role":"user", "content":[{"type":"input_text","text":"Continue from the source summary."}]}
+    ]))?;
+    let prompt = Prompt {
+        input: inherited.clone(),
+        tools: tools.clone().into(),
+        parallel_tool_calls: true,
+        base_instructions: BaseInstructions {
+            text: "Retain the complete conversation and tool definitions.".to_owned(),
+            ..Default::default()
+        },
+        output_schema: Some(json!({
+            "type": "object", "properties": {"answer": {"type": "string"}},
+            "required": ["answer"], "additionalProperties": false
+        })),
+        ..Default::default()
+    };
+    let mut prior_prompt = prompt.clone();
+    prior_prompt.input.pop();
+    let prior_request = client.build_responses_request(
+        &prior_prompt,
+        &model,
+        Some(ReasoningEffort::Medium),
+        ReasoningSummary::Detailed,
+        None,
+        &metadata,
+        false,
+    )?;
+    let prior_wire = serde_json::to_value(&prior_request)?;
+    let mut session = client.new_session();
+    session.websocket_session.last_request = Some(prior_request);
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    sender
+        .send(super::LastResponse {
+            response_id: "cached-response".to_owned(),
+            items_added: Vec::new(),
+        })
+        .unwrap();
+    session.websocket_session.last_response_rx = Some(receiver);
+    let telemetry = test_session_telemetry();
+    assert_eq!(
+        session
+            .count_input_tokens(
+                &prompt,
+                &model,
+                &telemetry,
+                Some(ReasoningEffort::Medium),
+                ReasoningSummary::Detailed,
+                None,
+                &metadata,
+            )
+            .await?,
+        Some(617)
+    );
+    assert_eq!(
+        serde_json::to_value(session.websocket_session.last_request.as_ref().unwrap())?,
+        prior_wire
+    );
+    assert_eq!(
+        session.get_last_response().unwrap().response_id,
+        "cached-response"
+    );
+    assert_eq!(prompt.input, inherited);
+
+    let mut stream = session
+        .stream(
+            &prompt,
+            &model,
+            &telemetry,
+            Some(ReasoningEffort::Medium),
+            ReasoningSummary::Detailed,
+            None,
+            &metadata,
+            &InferenceTraceContext::disabled(),
+        )
+        .await?;
+    let mut completed = false;
+    while let Some(event) = stream.next().await {
+        if let ResponseEvent::Completed { response_id, .. } = event? {
+            assert_eq!(response_id, "counted-response");
+            completed = true;
+        }
+    }
+    assert!(completed);
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    let count: serde_json::Value = serde_json::from_slice(&requests[0].body)?;
+    let generation: serde_json::Value = serde_json::from_slice(&requests[1].body)?;
+    for key in [
+        "model",
+        "input",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "reasoning",
+        "text",
+    ] {
+        assert_eq!(&count[key], &generation[key], "field {key}");
+    }
+    assert_eq!(count["model"], "counted-model");
+    assert_eq!(count["reasoning"]["effort"], "medium");
+    assert_eq!(count["reasoning"]["summary"], "detailed");
+    assert!(count["text"].is_object());
+    let instructions_index = usize::from(responses_lite);
+    assert_eq!(count["input"][instructions_index]["role"], "developer");
+    assert_eq!(
+        count["input"][instructions_index]["content"][0]["text"],
+        prompt.base_instructions.text
+    );
+    let source_index = instructions_index + 1;
+    assert_eq!(
+        count["input"].as_array().unwrap().len(),
+        source_index + inherited.len()
+    );
+    assert_eq!(
+        count["input"][source_index]["summary"][0]["text"],
+        "Readable source summary"
+    );
+    assert!(
+        count["input"][source_index]
+            .get("encrypted_content")
+            .is_none()
+    );
+    assert_eq!(
+        count["input"][source_index + 1]["content"][0]["text"],
+        UNAVAILABLE_ENCRYPTED_CONTENT
+    );
+    assert_eq!(
+        count["input"][source_index + 2]["output"][0]["text"],
+        "{\"encrypted_content\":\"ordinary tool data\"}"
+    );
+    assert_eq!(
+        count["input"][source_index + 2]["output"][1]["text"],
+        UNAVAILABLE_ENCRYPTED_CONTENT
+    );
+    if responses_lite {
+        assert!(count.get("tools").is_none());
+        assert_eq!(count["input"][0]["type"], "additional_tools");
+        assert_eq!(
+            count["input"][0]["tools"][0]["tools"][0]["parameters"],
+            tool_schema
+        );
+    } else {
+        assert_eq!(count["tools"], serde_json::to_value(&tools)?);
+        assert_eq!(count["tools"][0]["parameters"], tool_schema);
+    }
+    assert!(count.get("previous_response_id").is_none());
+    assert!(count.get("delta").is_none());
+    assert!(count.get("stream").is_none());
+    assert_eq!(prompt.input, inherited);
+    Ok(())
+}
+
+#[tokio::test]
+async fn input_token_count_without_endpoint_returns_none_without_http() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let mut client = test_model_client(SessionSource::Cli);
+    Arc::get_mut(&mut client.state).unwrap().provider = create_model_provider(
+        create_oss_provider_with_base_url(&format!("{}/v1", server.uri()), WireApi::Responses),
+        None,
+    );
+    let metadata = test_responses_metadata_for_client(
+        &client,
+        None,
+        format!("{}:0", client.state.thread_id),
+        None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+    let result = client
+        .new_session()
+        .count_input_tokens(
+            &Prompt::default(),
+            &test_model_info(),
+            &test_session_telemetry(),
+            None,
+            codex_protocol::config_types::ReasoningSummary::None,
+            None,
+            &metadata,
+        )
+        .await?;
+    assert_eq!(result, None);
+    assert!(server.received_requests().await.unwrap().is_empty());
+    Ok(())
+}
+
+#[test_case::test_case(false; "invalid count body propagates")]
+#[test_case::test_case(true; "http failure propagates")]
+#[tokio::test]
+async fn input_token_count_propagates_provider_errors(http_failure: bool) -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/count"))
+        .respond_with(
+            ResponseTemplate::new(if http_failure { 400 } else { 200 })
+                .set_body_json(json!({"error": {"message": "Count request rejected"}})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut provider =
+        create_oss_provider_with_base_url(&format!("{}/v1", server.uri()), WireApi::Responses);
+    provider.input_tokens_endpoint = Some("count".to_owned());
+    provider.request_max_retries = Some(0);
+    let mut client = test_model_client(SessionSource::Cli);
+    Arc::get_mut(&mut client.state).unwrap().provider = create_model_provider(provider, None);
+    let metadata = test_responses_metadata_for_client(
+        &client,
+        None,
+        format!("{}:0", client.state.thread_id),
+        None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+    let error = client
+        .new_session()
+        .count_input_tokens(
+            &Prompt::default(),
+            &test_model_info(),
+            &test_session_telemetry(),
+            None,
+            codex_protocol::config_types::ReasoningSummary::None,
+            None,
+            &metadata,
+        )
+        .await
+        .unwrap_err();
+    if http_failure {
+        assert!(
+            matches!(error.details(), CodexErrorDetails::InvalidRequest(message) if serde_json::from_str::<serde_json::Value>(message).unwrap() == json!({"error": {"message": "Count request rejected"}}))
+        );
+    } else {
+        assert!(
+            matches!(error.details(), CodexErrorDetails::Stream(message) if message == "invalid Responses input-token count response")
+        );
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    Ok(())
+}
+
+#[test_case::test_case(false; "refresh recovers count")]
+#[test_case::test_case(true; "repeated unauthorized stops without generation")]
+#[tokio::test]
+async fn input_token_count_reuses_bounded_native_auth_recovery(
+    refreshed_token_rejected: bool,
+) -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses/input_tokens"))
+        .and(wiremock::matchers::header(
+            "authorization",
+            "Bearer expired-token",
+        ))
+        .respond_with(ResponseTemplate::new(401).set_body_string("expired credential"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses/input_tokens"))
+        .and(wiremock::matchers::header(
+            "authorization",
+            "Bearer refreshed-token",
+        ))
+        .respond_with(if refreshed_token_rejected {
+            ResponseTemplate::new(401).set_body_string("refreshed credential rejected")
+        } else {
+            ResponseTemplate::new(200).set_body_json(json!({
+                "object": "response.input_tokens", "input_tokens": 321
+            }))
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let mut info =
+        create_oss_provider_with_base_url(&format!("{}/v1", server.uri()), WireApi::Responses);
+    info.input_tokens_endpoint = Some("responses/input_tokens".to_owned());
+    info.request_max_retries = Some(0);
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let mut client = test_model_client(SessionSource::Cli);
+    Arc::get_mut(&mut client.state).unwrap().provider = Arc::new(TestRecoveryProvider {
+        inner: create_model_provider(info, None),
+        should_fail: false,
+        attempts: Arc::clone(&attempts),
+    });
+    let metadata = test_responses_metadata_for_client(
+        &client,
+        None,
+        format!("{}:0", client.state.thread_id),
+        None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+    let result = client
+        .new_session()
+        .count_input_tokens(
+            &Prompt::default(),
+            &test_model_info(),
+            &test_session_telemetry(),
+            None,
+            codex_protocol::config_types::ReasoningSummary::None,
+            None,
+            &metadata,
+        )
+        .await;
+    if refreshed_token_rejected {
+        let error = result.expect_err("a second 401 must stop after native recovery");
+        match error.details() {
+            CodexErrorDetails::UnexpectedStatus(response) => {
+                assert_eq!(response.status, http::StatusCode::UNAUTHORIZED);
+                assert_eq!(response.body, "refreshed credential rejected");
+            }
+            other => panic!("unexpected count recovery error: {other}"),
+        }
+    } else {
+        assert_eq!(result?, Some(321));
+    }
+    assert_eq!(attempts.load(Ordering::Relaxed), 1);
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].url.path(), "/v1/responses/input_tokens");
+    assert_eq!(requests[1].url.path(), "/v1/responses/input_tokens");
+    assert_eq!(requests[0].headers["authorization"], "Bearer expired-token");
+    assert_eq!(
+        requests[1].headers["authorization"],
+        "Bearer refreshed-token"
+    );
+    assert_eq!(requests[0].body, requests[1].body);
     Ok(())
 }

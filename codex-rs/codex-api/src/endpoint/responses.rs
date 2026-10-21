@@ -1,6 +1,9 @@
 use crate::auth::SharedAuthProvider;
+use crate::common::Reasoning;
 use crate::common::ResponseStream;
 use crate::common::ResponsesApiRequest;
+use crate::common::ResponsesApiTools;
+use crate::common::TextControls;
 use crate::endpoint::session::EndpointSession;
 use crate::error::ApiError;
 use crate::provider::Provider;
@@ -14,14 +17,46 @@ use codex_client::EncodedJsonBody;
 use codex_client::HttpTransport;
 use codex_client::RequestCompression;
 use codex_client::RequestTelemetry;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::SessionSource;
 use http::HeaderMap;
 use http::HeaderValue;
 use http::Method;
+use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use tracing::instrument;
+use url::Url;
+
+/// Count only the fields accepted by the Responses input-token count API. Base
+/// instructions are already part of the prepared request's `input` items.
+#[derive(Serialize)]
+struct InputTokenCountRequest<'a> {
+    model: &'a str,
+    input: &'a [ResponseItem],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<&'a ResponsesApiTools>,
+    tool_choice: &'a str,
+    parallel_tool_calls: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<&'a Reasoning>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<&'a TextControls>,
+}
+
+#[derive(Deserialize)]
+struct InputTokenCountResponse {
+    object: InputTokenCountObject,
+    input_tokens: u64,
+}
+
+#[derive(Deserialize)]
+enum InputTokenCountObject {
+    #[serde(rename = "response.input_tokens")]
+    InputTokens,
+}
 
 pub struct ResponsesClient<T: HttpTransport> {
     session: EndpointSession<T>,
@@ -55,6 +90,68 @@ impl<T: HttpTransport> ResponsesClient<T> {
             session: self.session.with_request_telemetry(request),
             sse_telemetry: sse,
         }
+    }
+
+    /// Resolve the configured endpoint using provider-relative path semantics or
+    /// an absolute URL, preserving endpoint and provider query parameters.
+    pub fn input_tokens_request_url(
+        provider: &Provider,
+        endpoint: &str,
+    ) -> Result<String, ApiError> {
+        let invalid_endpoint = || ApiError::InvalidRequest {
+            message: "input_tokens_endpoint must be a valid URL or provider-relative path"
+                .to_string(),
+        };
+        let mut url = match Url::parse(endpoint) {
+            Ok(url) => url,
+            Err(url::ParseError::RelativeUrlWithoutBase) => Url::parse(&format!(
+                "{}/{}",
+                provider.base_url.trim_end_matches('/'),
+                endpoint.trim_start_matches('/'),
+            ))
+            .map_err(|_| invalid_endpoint())?,
+            Err(_) => return Err(invalid_endpoint()),
+        };
+        if let Some(params) = &provider.query_params {
+            url.query_pairs_mut().extend_pairs(params);
+        }
+        Ok(url.into())
+    }
+
+    /// Count a fully prepared request without generating a response. The selected
+    /// endpoint uses the same provider authentication, headers, and retry policy.
+    pub async fn count_input_tokens(
+        &self,
+        request: &ResponsesApiRequest,
+        endpoint: &str,
+        extra_headers: HeaderMap,
+    ) -> Result<i64, ApiError> {
+        let request_url = Self::input_tokens_request_url(self.session.provider(), endpoint)?;
+        let body = serde_json::to_value(InputTokenCountRequest {
+            model: &request.model,
+            input: &request.input,
+            tools: request.tools.as_ref(),
+            tool_choice: &request.tool_choice,
+            parallel_tool_calls: request.parallel_tool_calls,
+            reasoning: request.reasoning.as_ref(),
+            text: request.text.as_ref(),
+        })
+        .map_err(|_| ApiError::Stream("failed to encode input-token count request".to_string()))?;
+        let response = self
+            .session
+            .execute_with(Method::POST, endpoint, extra_headers, Some(body), |req| {
+                req.url.clone_from(&request_url);
+            })
+            .await?;
+        let InputTokenCountResponse {
+            object: InputTokenCountObject::InputTokens,
+            input_tokens,
+        } = serde_json::from_slice(&response.body).map_err(|_| {
+            ApiError::Stream("invalid Responses input-token count response".to_string())
+        })?;
+        i64::try_from(input_tokens).map_err(|_| {
+            ApiError::Stream("Responses input-token count exceeds the supported range".to_string())
+        })
     }
 
     #[instrument(
@@ -157,3 +254,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
         ))
     }
 }
+
+#[cfg(test)]
+#[path = "responses_input_tokens_tests.rs"]
+mod input_tokens_tests;

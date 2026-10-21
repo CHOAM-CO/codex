@@ -421,7 +421,9 @@ pub(crate) async fn run_turn(
         .await;
     }
 
-    if super::async_compaction::enabled(&turn_context) {
+    if super::async_compaction::enabled(&turn_context)
+        && turn_context.provider.info().input_tokens_endpoint.is_none()
+    {
         let token_status = super::context_window::context_window_token_status(
             sess.as_ref(),
             turn_context.as_ref(),
@@ -457,6 +459,7 @@ pub(crate) async fn run_turn(
 
     let mut next_step_context = Some(first_step_context);
     let mut guardian_budget_compacted = false;
+    let mut input_tokens_compacted = false;
     loop {
         // Note that pending_input would be something like a message the user
         // submitted through the UI while the model was running. Though the UI
@@ -565,6 +568,7 @@ pub(crate) async fn run_turn(
             .instrument(trace_span!("run_turn.prepare_sampling_request_input"))
             .await;
 
+            let use_prefill_baseline = !model_transition || model_response_started;
             run_sampling_request(
                 Arc::clone(&sess),
                 Arc::clone(&step_context),
@@ -572,6 +576,8 @@ pub(crate) async fn run_turn(
                 Arc::clone(&turn_diff_tracker),
                 &mut client_session,
                 &mut model_response_started,
+                auto_compaction_enabled,
+                use_prefill_baseline,
                 sampling_request_input,
                 cancellation_token.child_token(),
             )
@@ -579,11 +585,60 @@ pub(crate) async fn run_turn(
         }
         .await;
         match sampling_request_result {
-            Ok((sampling_request_output, sampling_request_input)) => {
+            Ok(SamplingRequestOutcome::InputTokensLimitReached(input_tokens)) => {
+                if input_tokens_compacted || (transition_compacted && !model_response_started) {
+                    return Err(CodexErr::InvalidRequest(format!(
+                        "Compaction completed, but the prepared request still exceeds the budget for {} ({input_tokens} input tokens). No generation request was sent.",
+                        step_context.settings.model_info.slug,
+                    )));
+                }
+                input_tokens_compacted = true;
+                let compacted_previous = if model_transition && !model_response_started {
+                    let compacted = maybe_run_previous_model_inline_compact(
+                        &sess,
+                        &turn_context,
+                        &mut client_session,
+                        previous_turn_settings.as_ref(),
+                        /*context_overflow*/ true,
+                        &cancellation_token,
+                    )
+                    .await?
+                    .is_some();
+                    transition_compacted |= compacted;
+                    compacted
+                } else {
+                    false
+                };
+                if !compacted_previous {
+                    run_auto_compact(
+                        &sess,
+                        Arc::clone(&step_context),
+                        Arc::clone(&step_context),
+                        &mut client_session,
+                        CompactionReason::ContextLimit,
+                        CompactionPhase::MidTurn,
+                        /*candidate*/ None,
+                    )
+                    .await?;
+                }
+                if run_pending_session_start_hooks(&sess, &turn_context).await {
+                    return Ok(None);
+                }
+                // Rebuild the entire request, including this turn's input and current tools,
+                // and count the resulting context before any generation attempt.
+                can_drain_pending_input = false;
+                continue;
+            }
+            Ok(SamplingRequestOutcome::Response(
+                sampling_request_output,
+                sampling_request_input,
+            )) => {
                 guardian_budget_compacted = false;
+                input_tokens_compacted = false;
                 let SamplingRequestResult {
                     needs_follow_up: model_needs_follow_up,
                     last_agent_message: sampling_request_last_agent_message,
+                    token_usage_observed,
                 } = sampling_request_output;
                 if model_needs_follow_up {
                     sess.input_queue
@@ -609,22 +664,30 @@ pub(crate) async fn run_turn(
                 .instrument(trace_span!("run_turn.collect_post_sampling_state"))
                 .await;
                 let needs_follow_up = model_needs_follow_up || has_pending_input;
-                let token_limit_reached = token_status.token_limit_reached;
+                // A compatible endpoint may omit response usage. In that case its next
+                // prepared-input count decides, rather than an inherited tokenizer estimate.
+                let use_observed_token_status =
+                    turn_context.provider.info().input_tokens_endpoint.is_none()
+                        || token_usage_observed;
+                let token_limit_reached =
+                    use_observed_token_status && token_status.token_limit_reached;
 
-                super::async_compaction::maybe_start(
-                    &sess,
-                    &step_context,
-                    &world_state,
-                    if needs_follow_up {
-                        CompactionPhase::MidTurn
-                    } else {
-                        CompactionPhase::PostTurn
-                    },
-                    &cancellation_token,
-                    &token_status,
-                    client_session.turn_state_with_auth_owner(),
-                )
-                .await;
+                if use_observed_token_status {
+                    super::async_compaction::maybe_start(
+                        &sess,
+                        &step_context,
+                        &world_state,
+                        if needs_follow_up {
+                            CompactionPhase::MidTurn
+                        } else {
+                            CompactionPhase::PostTurn
+                        },
+                        &cancellation_token,
+                        &token_status,
+                        client_session.turn_state_with_auth_owner(),
+                    )
+                    .await;
+                }
 
                 trace!(
                     turn_id = %turn_context.sub_id,
@@ -658,7 +721,7 @@ pub(crate) async fn run_turn(
                     );
                 }
 
-                let candidate = if needs_follow_up {
+                let candidate = if needs_follow_up && use_observed_token_status {
                     super::async_compaction::take_ready(&sess, &turn_context).await
                 } else {
                     None
@@ -668,7 +731,7 @@ pub(crate) async fn run_turn(
                     && (sess.take_new_context_window_request().await
                         || token_limit_reached
                         || candidate.is_some());
-                if auto_compaction_enabled {
+                if auto_compaction_enabled && use_observed_token_status {
                     let allow_auto_compact_fallback = !should_roll_over && !token_limit_reached;
                     super::token_budget::maybe_record(
                         sess.as_ref(),
@@ -693,6 +756,7 @@ pub(crate) async fn run_turn(
                     .await;
                     match compacted {
                         Ok(true) => {
+                            input_tokens_compacted = true;
                             if run_pending_session_start_hooks(&sess, &turn_context).await {
                                 return Ok(None);
                             }
@@ -795,9 +859,13 @@ pub(crate) async fn run_turn(
                             turn_context.as_ref(),
                         )
                         .await;
-                        let foreground_due = token_status.turn_end_compaction_threshold_reached;
-                        let candidate =
-                            super::async_compaction::take_ready(&sess, &turn_context).await;
+                        let foreground_due = use_observed_token_status
+                            && token_status.turn_end_compaction_threshold_reached;
+                        let candidate = if use_observed_token_status {
+                            super::async_compaction::take_ready(&sess, &turn_context).await
+                        } else {
+                            None
+                        };
                         if (foreground_due || candidate.is_some())
                             && let Err(err) = run_auto_compact(
                                 &sess,
@@ -1428,6 +1496,11 @@ async fn run_pre_sampling_compact(
         ensure_compacted_history_fits(sess, turn_context).await?;
         return Ok(true);
     }
+    if turn_context.provider.info().input_tokens_endpoint.is_some() {
+        // A ready candidate can fall back to foreground compaction when its model changed.
+        // Defer that path too: the inherited usage is not a count of the target's request.
+        return Ok(compacted_previous.is_some());
+    }
     let candidate = super::async_compaction::take_ready(sess, turn_context).await;
     // Compact if the configured auto-compaction budget or usable context window is exhausted.
     if token_status.token_limit_reached || candidate.is_some() {
@@ -1454,6 +1527,10 @@ async fn ensure_compacted_history_fits(
     sess: &Session,
     turn_context: &TurnContext,
 ) -> CodexResult<()> {
+    if turn_context.provider.info().input_tokens_endpoint.is_some() {
+        // The next prepared request is counted with the selected provider's tokenizer.
+        return Ok(());
+    }
     let token_status = super::context_window::context_window_token_status(sess, turn_context).await;
     if token_status.token_limit_reached {
         return Err(CodexErr::InvalidRequest(format!(
@@ -1506,7 +1583,11 @@ async fn maybe_run_previous_model_inline_compact(
         return Ok(None);
     }
     let status = super::context_window::context_window_token_status(sess, turn_context).await;
-    if !context_overflow && !should_compact_for_comp_hash_change && !status.token_limit_reached {
+    let counts_prepared_input = turn_context.provider.info().input_tokens_endpoint.is_some();
+    if !context_overflow
+        && !should_compact_for_comp_hash_change
+        && (counts_prepared_input || !status.token_limit_reached)
+    {
         return Ok(None);
     }
     let runtime = previous_turn_settings.model_runtime.as_ref().ok_or_else(|| {
@@ -1544,7 +1625,9 @@ async fn maybe_run_previous_model_inline_compact(
             AutoCompactTokenLimitScope::Total => status.token_limit_reached,
             AutoCompactTokenLimitScope::BodyAfterPrefix => status.full_context_window_limit_reached,
         };
-    let reason = if context_overflow || (smaller_window && previous_model_limit_reached) {
+    let reason = if context_overflow
+        || (!counts_prepared_input && smaller_window && previous_model_limit_reached)
+    {
         CompactionReason::ModelDownshift
     } else if should_compact_for_comp_hash_change {
         CompactionReason::CompHashChanged
@@ -1819,9 +1902,11 @@ async fn run_sampling_request(
     turn_diff_tracker: SharedTurnDiffTracker,
     client_session: &mut ModelClientSession,
     model_response_started: &mut bool,
+    auto_compaction_enabled: bool,
+    use_prefill_baseline: bool,
     input: Vec<ResponseItem>,
     cancellation_token: CancellationToken,
-) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>)> {
+) -> CodexResult<SamplingRequestOutcome> {
     let turn_context = Arc::clone(&step_context.turn);
     let preempt = step_context.preempt.clone().unwrap_or_default();
     let _input_watch = if let Some(preempt) = &step_context.preempt {
@@ -1882,6 +1967,40 @@ async fn run_sampling_request(
             )
             .await?;
         }
+        let effort = sess
+            .reasoning_effort_for_request(
+                &step_context.settings,
+                super::RequestEffortUsage::InputTokenCount,
+            )
+            .await;
+        if auto_compaction_enabled
+            && let Some(input_tokens) = client_session
+                .count_input_tokens(
+                    &prompt,
+                    &step_context.settings.model_info,
+                    &step_context.session_telemetry,
+                    effort.clone(),
+                    step_context.settings.reasoning_summary,
+                    step_context.settings.service_tier.clone(),
+                    &responses_metadata,
+                )
+                .or_cancel(&cancellation_token)
+                .await??
+        {
+            let status = super::context_window::context_window_token_status_with_input_tokens(
+                &sess,
+                &turn_context,
+                &step_context.settings.model_info,
+                input_tokens,
+                use_prefill_baseline,
+            )
+            .await;
+            if status.token_limit_reached {
+                return Ok(SamplingRequestOutcome::InputTokensLimitReached(
+                    input_tokens,
+                ));
+            }
+        }
         let err = match try_run_sampling_request(
             tool_runtime.clone(),
             Arc::clone(&sess),
@@ -1897,7 +2016,10 @@ async fn run_sampling_request(
         .await
         {
             Ok(output) => {
-                return Ok((output, original_input.unwrap_or(prompt.input)));
+                return Ok(SamplingRequestOutcome::Response(
+                    output,
+                    original_input.unwrap_or(prompt.input),
+                ));
             }
             Err(err) => match err.details() {
                 CodexErrorDetails::ContextWindowExceeded => {
@@ -1933,10 +2055,11 @@ async fn run_sampling_request(
             return Err(CodexErr::TurnAborted);
         }
         if preempt.is_cancelled() {
-            return Ok((
+            return Ok(SamplingRequestOutcome::Response(
                 SamplingRequestResult {
                     needs_follow_up: true,
                     last_agent_message: None,
+                    token_usage_observed: false,
                 },
                 std::mem::take(original_input),
             ));
@@ -2084,6 +2207,12 @@ pub(crate) async fn built_tools(
 struct SamplingRequestResult {
     needs_follow_up: bool,
     last_agent_message: Option<String>,
+    token_usage_observed: bool,
+}
+
+enum SamplingRequestOutcome {
+    Response(SamplingRequestResult, Vec<ResponseItem>),
+    InputTokensLimitReached(i64),
 }
 
 /// Ephemeral per-response state for streaming a single proposed plan.
@@ -2864,6 +2993,7 @@ async fn try_run_sampling_request(
                 break Ok(SamplingRequestResult {
                     needs_follow_up: true,
                     last_agent_message,
+                    token_usage_observed: false,
                 });
             }
             Err(_) => break Err(CodexErr::TurnAborted),
@@ -2917,14 +3047,23 @@ async fn try_run_sampling_request(
             )
         {
             *model_response_started = true;
-            sess.set_previous_turn_settings(Some(PreviousTurnSettings {
+            let mut state = sess.state.lock().await;
+            if state
+                .previous_turn_settings()
+                .as_ref()
+                .is_some_and(|previous| model_runtime_changed(previous, &turn_context))
+            {
+                // Prefix tokens belong to the tokenizer that observed them. Keep cumulative
+                // usage and window identity; the target's first real usage establishes its prefix.
+                state.clear_auto_compact_window_prefill();
+            }
+            state.set_previous_turn_settings(Some(PreviousTurnSettings {
                 model: turn_context.model_info().slug.clone(),
                 model_runtime: Some(turn_context.model_runtime()),
                 cyber_access_program: turn_context.cyber_access_program,
                 comp_hash: turn_context.model_info().comp_hash.clone(),
                 realtime_active: Some(turn_context.realtime_active),
-            }))
-            .await;
+            }));
         }
 
         match event {
@@ -3065,6 +3204,7 @@ async fn try_run_sampling_request(
                     break Ok(SamplingRequestResult {
                         needs_follow_up: true,
                         last_agent_message,
+                        token_usage_observed: false,
                     });
                 }
             }
@@ -3252,6 +3392,7 @@ async fn try_run_sampling_request(
                 break Ok(SamplingRequestResult {
                     needs_follow_up,
                     last_agent_message,
+                    token_usage_observed: token_usage.is_some(),
                 });
             }
             ResponseEvent::OutputTextDelta(delta) => {

@@ -298,6 +298,10 @@ impl SessionState {
         self.auto_compact_window.set_estimated_prefill(tokens);
     }
 
+    pub(crate) fn clear_auto_compact_window_prefill(&mut self) {
+        self.auto_compact_window.clear_prefill();
+    }
+
     pub(crate) fn auto_compact_window_snapshot(&self) -> AutoCompactWindowSnapshot {
         self.auto_compact_window.snapshot()
     }

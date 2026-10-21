@@ -145,6 +145,11 @@ pub struct ModelProviderInfo {
     /// Optional full URL for a Codex-native model catalog. When unset, OpenAI discovery
     /// uses the Codex backend unless `base_url` overrides the inference endpoint.
     pub model_catalog_url: Option<RedactedString>,
+    /// Optional endpoint implementing the Responses input-token count contract.
+    /// A relative path is appended to `base_url`; an absolute URL is used directly.
+    /// When unset, Codex uses its existing context-token estimate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_tokens_endpoint: Option<String>,
     /// Environment variable that stores the user's API key for this provider.
     pub env_key: Option<String>,
 
@@ -528,6 +533,7 @@ other non-default provider fields are not supported"
             name: OPENAI_PROVIDER_NAME.into(),
             base_url,
             model_catalog_url: None,
+            input_tokens_endpoint: None,
             env_key: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
@@ -575,6 +581,7 @@ other non-default provider fields are not supported"
             // endpoint override.
             base_url: None,
             model_catalog_url: None,
+            input_tokens_endpoint: None,
             env_key: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
@@ -757,6 +764,7 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
         name: "gpt-oss".into(),
         base_url: Some(base_url.into()),
         model_catalog_url: None,
+        input_tokens_endpoint: None,
         env_key: None,
         env_key_instructions: None,
         experimental_bearer_token: None,

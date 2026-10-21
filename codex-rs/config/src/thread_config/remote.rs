@@ -174,6 +174,7 @@ fn model_provider_from_proto(
         name: provider.name,
         base_url: provider.base_url,
         model_catalog_url: provider.model_catalog_url.map(Into::into),
+        input_tokens_endpoint: provider.input_tokens_endpoint,
         env_key: provider.env_key,
         env_key_instructions: provider.env_key_instructions,
         experimental_bearer_token: provider.experimental_bearer_token.map(Into::into),
@@ -209,6 +210,7 @@ fn model_provider_to_proto(
         name,
         base_url,
         model_catalog_url,
+        input_tokens_endpoint,
         env_key,
         env_key_instructions,
         experimental_bearer_token,
@@ -235,6 +237,7 @@ fn model_provider_to_proto(
         name,
         base_url,
         model_catalog_url: model_catalog_url.map(RedactedString::into_inner),
+        input_tokens_endpoint,
         env_key,
         env_key_instructions,
         experimental_bearer_token: experimental_bearer_token.map(RedactedString::into_inner),
@@ -344,6 +347,29 @@ mod tests {
     use super::proto::thread_config_loader_server;
     use super::proto::thread_config_loader_server::ThreadConfigLoaderServer;
     use super::*;
+
+    #[test]
+    fn input_tokens_endpoint_survives_remote_provider_round_trip() {
+        use prost::Message;
+
+        for endpoint in [
+            None,
+            Some("/responses/input_tokens".to_string()),
+            Some("https://count.example/measure?deployment=example".to_string()),
+        ] {
+            let provider = ModelProviderInfo {
+                name: "Example".to_string(),
+                input_tokens_endpoint: endpoint,
+                ..Default::default()
+            };
+            let encoded = model_provider_to_proto("example", provider.clone()).encode_to_vec();
+            let decoded = proto::ModelProvider::decode(encoded.as_slice()).unwrap();
+            assert_eq!(
+                model_provider_from_proto(decoded).unwrap(),
+                ("example".to_string(), provider),
+            );
+        }
+    }
     use crate::SessionThreadConfig;
     use crate::UserThreadConfig;
 
@@ -483,6 +509,7 @@ mod tests {
                             model_catalog_url: Some(
                                 "http://127.0.0.1:8061/api/codex/models".to_string(),
                             ),
+                            input_tokens_endpoint: Some("/responses/input_tokens".to_string()),
                             env_key: None,
                             env_key_instructions: None,
                             experimental_bearer_token: None,
@@ -554,6 +581,7 @@ mod tests {
             name: "Local".to_string(),
             base_url: Some("http://127.0.0.1:8061/api/codex".to_string()),
             model_catalog_url: Some("http://127.0.0.1:8061/api/codex/models".into()),
+            input_tokens_endpoint: Some("/responses/input_tokens".to_string()),
             env_key: None,
             env_key_instructions: None,
             experimental_bearer_token: None,

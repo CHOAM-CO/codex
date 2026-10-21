@@ -16,11 +16,12 @@ use codex_protocol::models::ConfigurationReasoning;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
 
-/// Sampling can establish a pin; compaction must not change live state before it succeeds.
+/// Sampling can establish a pin; compaction and input counting must preserve the live baseline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RequestEffortUsage {
     Sampling,
     Compaction,
+    InputTokenCount,
 }
 
 impl Session {
@@ -129,7 +130,11 @@ impl Session {
             RequestEffortUsage::Sampling => state
                 .reasoning_effort_pin
                 .pin(&settings.model_info.slug, effort),
-            // Failed compaction and fallback-model lookups must not mutate the live pin.
+            RequestEffortUsage::InputTokenCount => state
+                .reasoning_effort_pin
+                .get(&settings.model_info.slug)
+                .unwrap_or(effort),
+            // Compaction and preflight counts must not mutate the live pin.
             RequestEffortUsage::Compaction => effort,
         })
     }

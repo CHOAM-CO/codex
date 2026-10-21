@@ -1318,6 +1318,19 @@ impl ModelClient {
         endpoint: &str,
         redirect_policy: ClientRedirectPolicy,
     ) -> Result<ReqwestTransport> {
+        self.build_api_transport_for_url(
+            api_provider,
+            &api_provider.url_for_path(endpoint),
+            redirect_policy,
+        )
+    }
+
+    fn build_api_transport_for_url(
+        &self,
+        api_provider: &ApiProvider,
+        url: &str,
+        redirect_policy: ClientRedirectPolicy,
+    ) -> Result<ReqwestTransport> {
         let redirect_policy = if api_provider
             .headers
             .contains_key(codex_model_provider::ACCOUNT_ROUTING_HEADER)
@@ -1328,7 +1341,7 @@ impl ModelClient {
         };
         let client = create_client_for_route(
             &self.http_client_factory,
-            &api_provider.url_for_path(endpoint),
+            url,
             ClientRouteClass::Api,
             redirect_policy,
         )
@@ -1340,6 +1353,98 @@ impl ModelClient {
         self.current_client_setup(ClientRouting::Workspace)
             .await
             .map(|_| ())
+    }
+
+    /// Counts the complete logical generation request before any WebSocket continuation delta.
+    /// The count is an input-budget observation, not model usage to persist in the session.
+    #[allow(clippy::too_many_arguments)]
+    async fn count_input_tokens(
+        &self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        effort: Option<ReasoningEffortConfig>,
+        summary: ReasoningSummaryConfig,
+        service_tier: Option<String>,
+        responses_metadata: &CodexResponsesMetadata,
+    ) -> Result<Option<i64>> {
+        let Some(endpoint) = self.state.provider.info().input_tokens_endpoint.as_deref() else {
+            return Ok(None);
+        };
+        let auth_manager = self.state.provider.auth_manager();
+        let mut auth_recovery = auth_manager
+            .as_ref()
+            .map(AuthManager::unauthorized_recovery);
+        let mut provider_auth_recovery_attempted = false;
+        let mut pending_retry = PendingUnauthorizedRetry::default();
+        loop {
+            let setup = self.current_client_setup(ClientRouting::Workspace).await?;
+            let url = ApiResponsesClient::<ReqwestTransport>::input_tokens_request_url(
+                &setup.api_provider,
+                endpoint,
+            )
+            .map_err(|error| self.state.provider.map_api_error(error))?;
+            let transport =
+                self.build_api_transport_for_url(&setup.api_provider, &url, setup.redirect_policy)?;
+            let include_internal = self
+                .state
+                .provider
+                .include_internal_metadata(&setup.api_provider);
+            let mut request = self.build_responses_request(
+                prompt,
+                model_info,
+                effort.clone(),
+                summary,
+                service_tier.clone(),
+                responses_metadata,
+                include_internal,
+            )?;
+            self.prepare_response_items_for_request(&mut request.input);
+            if let Some(input) = tool_metadata::bounded_input(&request, &request.input) {
+                request.input = input;
+            }
+            let telemetry = Self::build_request_telemetry(
+                session_telemetry,
+                AuthRequestTelemetryContext::new(
+                    setup.auth.as_ref().map(CodexAuth::auth_mode),
+                    setup.api_auth.as_ref(),
+                    setup.agent_identity_telemetry,
+                    pending_retry,
+                ),
+                RequestRouteTelemetry::for_endpoint("/responses/input_tokens"),
+                self.state.auth_env_telemetry.clone(),
+            );
+            let mut headers = self.build_subagent_headers();
+            headers.extend(self.build_responses_compatibility_headers(responses_metadata));
+            headers.extend(self.responses_headers(setup.auth.as_ref(), &model_info.slug));
+            let result = ApiResponsesClient::new(transport, setup.api_provider, setup.api_auth)
+                .with_telemetry(Some(telemetry), None)
+                .count_input_tokens(&request, endpoint, headers)
+                .await;
+            match result {
+                Ok(count) => return Ok(Some(count)),
+                Err(ApiError::Transport(unauthorized_transport))
+                    if self
+                        .state
+                        .provider
+                        .is_recoverable_auth_error(&unauthorized_transport) =>
+                {
+                    pending_retry = PendingUnauthorizedRetry::from_recovery(
+                        handle_unauthorized(
+                            unauthorized_transport,
+                            &mut auth_recovery,
+                            &mut provider_auth_recovery_attempted,
+                            session_telemetry,
+                            &self.state.provider,
+                            self.event_sender.as_ref(),
+                            responses_metadata.turn_id.as_deref(),
+                        )
+                        .await?,
+                    );
+                }
+                Err(error) => return Err(self.state.provider.map_api_error(error)),
+            }
+        }
     }
 
     /// Opens a websocket connection using the same header and telemetry wiring as normal turns.
@@ -2400,6 +2505,30 @@ impl ModelClientSession {
             }
             Err(err) => Err(err),
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn count_input_tokens(
+        &self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        effort: Option<ReasoningEffortConfig>,
+        summary: ReasoningSummaryConfig,
+        service_tier: Option<String>,
+        responses_metadata: &CodexResponsesMetadata,
+    ) -> Result<Option<i64>> {
+        self.client
+            .count_input_tokens(
+                prompt,
+                model_info,
+                session_telemetry,
+                effort,
+                summary,
+                service_tier,
+                responses_metadata,
+            )
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]

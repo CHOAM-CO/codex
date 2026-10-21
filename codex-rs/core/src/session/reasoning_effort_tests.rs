@@ -65,8 +65,10 @@ async fn initial_replay_preserves_prewarmed_effort(history: InitialHistory) {
     );
 }
 
+#[test_case(RequestEffortUsage::Compaction; "compaction")]
+#[test_case(RequestEffortUsage::InputTokenCount; "input count")]
 #[tokio::test]
-async fn compaction_effort_lookup_preserves_pin_for_fallback_models() {
+async fn compaction_effort_lookup_preserves_pin_for_fallback_models(usage: RequestEffortUsage) {
     let (session, turn_context, _events) = make_session_and_context_with_auth_and_config_and_rx(
         CodexAuth::from_api_key("Test API Key"),
         Vec::new(),
@@ -92,9 +94,7 @@ async fn compaction_effort_lookup_preserves_pin_for_fallback_models() {
     model.default_reasoning_level = Some(effort.clone());
 
     assert_eq!(
-        session
-            .reasoning_effort_for_request(&settings, RequestEffortUsage::Compaction)
-            .await,
+        session.reasoning_effort_for_request(&settings, usage).await,
         Some(effort)
     );
     assert_eq!(
@@ -108,8 +108,12 @@ async fn compaction_effort_lookup_preserves_pin_for_fallback_models() {
     );
 }
 
+#[test_case(RequestEffortUsage::Compaction; "compaction")]
+#[test_case(RequestEffortUsage::InputTokenCount; "input count")]
 #[tokio::test]
-async fn unsupported_model_compaction_uses_selected_effort_without_mutating_pin() {
+async fn unsupported_model_compaction_uses_selected_effort_without_mutating_pin(
+    usage: RequestEffortUsage,
+) {
     let (session, turn_context, _events) = make_session_and_context_with_auth_and_config_and_rx(
         CodexAuth::from_api_key("Test API Key"),
         Vec::new(),
@@ -132,9 +136,7 @@ async fn unsupported_model_compaction_uses_selected_effort_without_mutating_pin(
         .pin(&settings.model_info.slug, ReasoningEffort::Low);
 
     assert_eq!(
-        session
-            .reasoning_effort_for_request(&settings, RequestEffortUsage::Compaction)
-            .await,
+        session.reasoning_effort_for_request(&settings, usage).await,
         Some(ReasoningEffort::High),
     );
     assert_eq!(

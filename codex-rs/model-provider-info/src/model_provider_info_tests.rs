@@ -6,6 +6,38 @@ use std::num::NonZeroU64;
 use tempfile::tempdir;
 
 #[test]
+fn input_tokens_endpoint_is_optional_and_round_trips() {
+    let unset: ModelProviderInfo = toml::from_str("name = 'Example'").unwrap();
+    assert_eq!(unset.input_tokens_endpoint, None);
+    assert_eq!(
+        ModelProviderInfo::create_openai_provider(None).input_tokens_endpoint,
+        None,
+    );
+    assert!(
+        !toml::Value::try_from(&unset)
+            .unwrap()
+            .as_table()
+            .unwrap()
+            .contains_key("input_tokens_endpoint")
+    );
+
+    for endpoint in [
+        "/responses/input_tokens",
+        "measure/input?deployment=example",
+        "https://count.example/v2/input_tokens?deployment=example",
+    ] {
+        let source = format!("name = 'Example'\ninput_tokens_endpoint = '{endpoint}'");
+        let provider: ModelProviderInfo = toml::from_str(&source).unwrap();
+        assert_eq!(provider.input_tokens_endpoint.as_deref(), Some(endpoint));
+        let serialized = toml::to_string(&provider).unwrap();
+        assert_eq!(
+            toml::from_str::<ModelProviderInfo>(&serialized).unwrap(),
+            provider
+        );
+    }
+}
+
+#[test]
 fn runtime_internal_metadata_opt_in_is_not_serialized_or_configurable() {
     let trusted = ModelProviderInfo {
         include_internal_metadata: true,
@@ -79,6 +111,7 @@ base_url = "http://localhost:11434/v1"
         name: "Ollama".into(),
         base_url: Some("http://localhost:11434/v1".into()),
         model_catalog_url: None,
+        input_tokens_endpoint: None,
         env_key: None,
         env_key_instructions: None,
         experimental_bearer_token: None,
@@ -116,6 +149,7 @@ query_params = { api-version = "2025-04-01-preview" }
         name: "Azure".into(),
         base_url: Some("https://xxxxx.openai.azure.com/openai".into()),
         model_catalog_url: None,
+        input_tokens_endpoint: None,
         env_key: Some("AZURE_OPENAI_API_KEY".into()),
         env_key_instructions: None,
         experimental_bearer_token: None,
@@ -157,6 +191,7 @@ supports_standalone_web_search = true
         name: "Example".into(),
         base_url: Some("https://example.com".into()),
         model_catalog_url: None,
+        input_tokens_endpoint: None,
         env_key: Some("API_KEY".into()),
         env_key_instructions: None,
         experimental_bearer_token: None,
@@ -343,6 +378,7 @@ fn test_create_amazon_bedrock_provider() {
             name: "Amazon Bedrock".to_string(),
             base_url: None,
             model_catalog_url: None,
+            input_tokens_endpoint: None,
             env_key: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
