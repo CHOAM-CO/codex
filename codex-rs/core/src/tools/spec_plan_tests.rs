@@ -3032,6 +3032,135 @@ async fn multi_agent_v2_can_use_configured_tool_namespace() {
 }
 
 #[tokio::test]
+async fn discodex_agent_contract_preserves_extensions_separately_from_native_catalog() {
+    use crate::tools::multi_agent_tool::DISCODEX_AGENT_NAMESPACE;
+
+    for namespace in [MULTI_AGENT_V2_NAMESPACE, DISCODEX_AGENT_NAMESPACE] {
+        for catalog_override in [false, true] {
+            let plan = probe(|turn| {
+                set_feature(turn, Feature::MultiAgentV2, true);
+                update_config(turn, |config| {
+                    config.multi_agent_v2.tool_namespace = Some(namespace.to_owned());
+                    config.multi_agent_v2.expose_spawn_agent_model_overrides = true;
+                });
+                update_turn_settings_for_test(turn, |settings| {
+                    let model = Arc::make_mut(&mut settings.model_info);
+                    model.tool_mode = Some(ToolMode::Direct);
+                    let messages = model.model_messages.get_or_insert_with(|| {
+                        serde_json::from_value(json!({})).expect("empty model messages")
+                    });
+                    messages.tools = catalog_override.then(|| {
+                        serde_json::from_value(json!({
+                            "multi_agent": {"spawn_agent": {"parameters": json!({
+                                "type": "object",
+                                "properties": {
+                                    "message": {"type": "string"},
+                                    "catalog_field": {"type": "string"}
+                                },
+                                "required": ["message"],
+                                "additionalProperties": false
+                            }).to_string()}}
+                        }))
+                        .expect("catalog tool messages")
+                    });
+                });
+            })
+            .await;
+            let payload = codex_tools::create_tools_json_for_responses_api(&plan.visible_specs)
+                .expect("serialize model request tools");
+            let namespace_payload = payload
+                .iter()
+                .find(|tool| tool["name"] == namespace)
+                .expect("configured namespace");
+            let spawn = namespace_payload["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tool| tool["name"] == "spawn_agent")
+                .expect("spawn_agent");
+            let properties = spawn["parameters"]["properties"].as_object().unwrap();
+            let custom = namespace == DISCODEX_AGENT_NAMESPACE;
+            assert_eq!(properties.contains_key("model_provider"), custom);
+            assert_eq!(properties.contains_key("executor"), custom);
+            assert_eq!(
+                properties.contains_key("catalog_field"),
+                catalog_override && !custom
+            );
+            assert_eq!(properties["message"]["encrypted"], true);
+            if custom {
+                assert_eq!(
+                    spawn["parameters"]["required"],
+                    json!(["task_name", "message"])
+                );
+                assert_eq!(properties["model"]["type"], "string");
+                assert_eq!(properties["model_provider"]["type"], "string");
+                assert_eq!(properties["executor"]["type"], "string");
+                plan.assert_visible_lacks(&[MULTI_AGENT_V2_NAMESPACE]);
+                plan.assert_registered_contains(&[&ToolName::namespaced(
+                    DISCODEX_AGENT_NAMESPACE,
+                    "spawn_agent",
+                )
+                .to_string()]);
+                plan.assert_registered_lacks(&[&ToolName::namespaced(
+                    MULTI_AGENT_V2_NAMESPACE,
+                    "spawn_agent",
+                )
+                .to_string()]);
+            }
+            assert!(plan.can_manage_children);
+        }
+    }
+}
+
+#[tokio::test]
+async fn discodex_spawn_dispatches_to_native_handler_with_extended_arguments() {
+    use crate::function_tool::FunctionCallError;
+    use crate::tools::context::ToolCallSource;
+    use crate::tools::context::ToolPayload;
+    use crate::tools::multi_agent_tool::DISCODEX_AGENT_NAMESPACE;
+    use crate::tools::router::ToolCall;
+
+    let (session, mut turn) = make_session_and_context().await;
+    set_feature(&mut turn, Feature::MultiAgentV2, true);
+    update_config(&mut turn, |config| {
+        config.multi_agent_v2.tool_namespace = Some(DISCODEX_AGENT_NAMESPACE.to_owned());
+    });
+    let router = plan_with_model(&turn, turn.model_info(), ToolPlanInputs::default());
+    let step_context = StepContext::for_test(Arc::new(turn));
+    // Empty input exercises native argument parsing and validation without starting a model.
+    let result = router
+        .dispatch_tool_call_with_code_mode_result(
+            Arc::new(session),
+            step_context,
+            tokio_util::sync::CancellationToken::new(),
+            Arc::new(tokio::sync::Mutex::new(
+                crate::turn_diff_tracker::TurnDiffTracker::new(),
+            )),
+            ToolCall {
+                tool_name: ToolName::namespaced(DISCODEX_AGENT_NAMESPACE, "spawn_agent"),
+                call_id: "spawn-extended-contract".to_owned(),
+                payload: ToolPayload::Function {
+                    arguments: json!({
+                        "task_name": "inspect",
+                        "message": "",
+                        "model": "child-example",
+                        "model_provider": "provider-example",
+                        "executor": "codex"
+                    })
+                    .to_string(),
+                },
+                encrypted_function_args: None,
+            },
+            ToolCallSource::DirectPlaintextMessage,
+        )
+        .await;
+    assert!(
+        matches!(result, Err(FunctionCallError::RespondToModel(message))
+        if message == "Empty message can't be sent to an agent")
+    );
+}
+
+#[tokio::test]
 async fn multi_agent_v2_namespace_is_supported_by_bedrock_provider() {
     let plan = probe(|turn| {
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);

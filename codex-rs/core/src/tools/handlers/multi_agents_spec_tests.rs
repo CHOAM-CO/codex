@@ -424,9 +424,34 @@ fn list_agents_tool_status_schema_includes_interrupted() {
 }
 
 #[test]
-fn both_spawn_tools_expose_configured_provider_and_executor_selection() {
+fn discodex_spawn_tool_exposes_configured_provider_and_executor_selection() {
     let options = SpawnAgentToolOptions {
-        available_model_providers: vec!["strata".into(), "openai".into()],
+        available_model_providers: vec!["local-example".into(), "cloud-example".into()],
+        expose_spawn_agent_model_overrides: true,
+        expose_provider_executor_overrides: true,
+        ..Default::default()
+    };
+    let ToolSpec::Function(v2) = create_spawn_agent_tool_v2(options, None) else {
+        panic!("v2 function");
+    };
+    let properties = v2.parameters.properties.as_ref().unwrap();
+    for name in ["model_provider", "executor"] {
+        assert_eq!(
+            properties[name].schema_type,
+            Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::String))
+        );
+    }
+    assert_eq!(
+        properties["model_provider"].description.as_deref(),
+        Some(
+            "Configured provider ID for the child model. An explicit model without this field uses the parent provider. Role settings take precedence; when model, provider, and executor are all omitted the configured child default applies. Available provider IDs: cloud-example, local-example"
+        )
+    );
+}
+
+#[test]
+fn native_spawn_tools_keep_their_reserved_parameter_contracts() {
+    let options = SpawnAgentToolOptions {
         expose_spawn_agent_model_overrides: true,
         ..Default::default()
     };
@@ -439,21 +464,38 @@ fn both_spawn_tools_expose_configured_provider_and_executor_selection() {
     let Some(ResponsesApiNamespaceTool::Function(v1)) = v1.tools.first() else {
         panic!("v1 function");
     };
-    for schema in [&v1.parameters, &v2.parameters] {
-        let properties = schema.properties.as_ref().unwrap();
-        assert_eq!(
-            properties["model_provider"].schema_type,
-            Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::String))
-        );
-        assert_eq!(
-            properties["executor"].schema_type,
-            Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::String))
-        );
-        assert_eq!(
-            properties["model_provider"].description.as_deref(),
-            Some(
-                "Configured provider ID for the child model. An explicit model without this field uses the parent provider. Role settings take precedence; when model, provider, and executor are all omitted the configured child default applies. Available provider IDs: openai, strata"
-            )
-        );
-    }
+    assert_eq!(
+        v1.parameters
+            .properties
+            .as_ref()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        [
+            "agent_type",
+            "fork_context",
+            "items",
+            "message",
+            "model",
+            "reasoning_effort"
+        ]
+    );
+    assert_eq!(
+        v2.parameters
+            .properties
+            .as_ref()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        [
+            "agent_type",
+            "fork_turns",
+            "message",
+            "model",
+            "reasoning_effort",
+            "task_name"
+        ]
+    );
 }

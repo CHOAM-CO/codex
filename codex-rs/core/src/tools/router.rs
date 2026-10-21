@@ -10,6 +10,7 @@ use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
 #[cfg(test)]
 use crate::tools::handlers::ToolSearchHandlerCache;
+use crate::tools::multi_agent_tool::DISCODEX_AGENT_NAMESPACE;
 use crate::tools::registry::AnyToolResult;
 use crate::tools::registry::RegisteredTool;
 use crate::tools::registry::ToolArgumentDiffConsumer;
@@ -54,15 +55,16 @@ pub struct ToolCall {
 
 impl ToolCall {
     pub(crate) fn direct_source(&self) -> ToolCallSource {
-        if self.tool_name.namespace.as_deref() == Some("collaboration")
-            && matches!(
-                self.tool_name.name.as_str(),
-                "spawn_agent" | "send_message" | "followup_task"
-            )
-            && self
-                .encrypted_function_args
-                .as_ref()
-                .is_some_and(Vec::is_empty)
+        if matches!(
+            self.tool_name.namespace.as_deref(),
+            Some("collaboration" | DISCODEX_AGENT_NAMESPACE)
+        ) && matches!(
+            self.tool_name.name.as_str(),
+            "spawn_agent" | "send_message" | "followup_task"
+        ) && self
+            .encrypted_function_args
+            .as_ref()
+            .is_some_and(Vec::is_empty)
         {
             ToolCallSource::DirectPlaintextMessage
         } else {

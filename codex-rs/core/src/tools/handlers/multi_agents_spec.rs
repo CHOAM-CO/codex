@@ -31,6 +31,8 @@ pub struct SpawnAgentToolOptions {
     pub expose_agent_type: bool,
     pub hide_agent_type_model_reasoning: bool,
     pub expose_spawn_agent_model_overrides: bool,
+    /// Discodex's custom V2 contract; never part of the reserved native schema.
+    pub expose_provider_executor_overrides: bool,
     pub multi_agent_version: MultiAgentVersion,
     pub model_catalog_in_context: bool,
     pub usage_hint_text: Option<String>,
@@ -45,6 +47,7 @@ impl Default for SpawnAgentToolOptions {
             expose_agent_type: true,
             hide_agent_type_model_reasoning: false,
             expose_spawn_agent_model_overrides: false,
+            expose_provider_executor_overrides: false,
             multi_agent_version: MultiAgentVersion::Disabled,
             model_catalog_in_context: false,
             usage_hint_text: None,
@@ -125,6 +128,18 @@ pub fn create_spawn_agent_tool_v2(
             .then_some(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE)
     };
     let mut properties = spawn_agent_common_properties_v2(&options);
+    if options.expose_provider_executor_overrides {
+        properties.insert(
+            "executor".to_string(),
+            JsonSchema::string(Some(
+                "Execution backend for the child: codex or antigravity. Requires the host to enable and support that backend; omission inherits the parent executor.".to_string(),
+            )),
+        );
+        properties.insert(
+            "model_provider".to_string(),
+            JsonSchema::string(Some(spawn_provider_description(&options))),
+        );
+    }
     if !options.expose_agent_type {
         properties.remove("agent_type");
     }
@@ -644,16 +659,6 @@ fn spawn_agent_common_properties_v1(
             )),
         ),
         (
-            "executor".to_string(),
-            JsonSchema::string(Some(
-                "Execution backend for the child: codex or antigravity. Requires the host to enable and support that backend; omission inherits the parent executor.".to_string(),
-            )),
-        ),
-        (
-            "model_provider".to_string(),
-            JsonSchema::string(Some(spawn_provider_description(options))),
-        ),
-        (
             "reasoning_effort".to_string(),
             JsonSchema::string(Some(
                 "Reasoning effort override for the new agent. Omit to inherit the parent effort."
@@ -692,16 +697,6 @@ fn spawn_agent_common_properties_v2(
             JsonSchema::string(Some(
                 SPAWN_AGENT_MODEL_OVERRIDE_DESCRIPTION.to_string(),
             )),
-        ),
-        (
-            "executor".to_string(),
-            JsonSchema::string(Some(
-                "Execution backend for the child: codex or antigravity. Requires the host to enable and support that backend; omission inherits the parent executor.".to_string(),
-            )),
-        ),
-        (
-            "model_provider".to_string(),
-            JsonSchema::string(Some(spawn_provider_description(options))),
         ),
         (
             "reasoning_effort".to_string(),

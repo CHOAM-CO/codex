@@ -45,6 +45,44 @@ use super::tool_log_payload;
 struct ExtensionEchoContributor;
 
 #[test]
+fn discodex_agent_message_encoding_uses_native_transport_metadata() {
+    use crate::tools::multi_agent_tool::DISCODEX_AGENT_NAMESPACE;
+
+    for namespace in ["collaboration", DISCODEX_AGENT_NAMESPACE, "other_tools"] {
+        for name in [
+            "spawn_agent",
+            "send_message",
+            "followup_task",
+            "list_agents",
+        ] {
+            for encrypted_function_args in
+                [None, Some(Vec::new()), Some(vec!["message".to_owned()])]
+            {
+                let call = ToolCall {
+                    tool_name: ToolName::namespaced(namespace, name),
+                    call_id: "encoding-call".to_owned(),
+                    payload: ToolPayload::Function {
+                        arguments: json!({"message": "example"}).to_string(),
+                    },
+                    encrypted_function_args: encrypted_function_args.clone(),
+                };
+                let plaintext = namespace != "other_tools"
+                    && name != "list_agents"
+                    && encrypted_function_args == Some(Vec::new());
+                assert_eq!(
+                    call.direct_source(),
+                    if plaintext {
+                        ToolCallSource::DirectPlaintextMessage
+                    } else {
+                        ToolCallSource::Direct
+                    }
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn tool_log_payload_redacts_plaintext_multi_agent_messages() {
     let payload = ToolPayload::Function {
         arguments: json!({"target": "/root/worker", "message": "secret message"}).to_string(),

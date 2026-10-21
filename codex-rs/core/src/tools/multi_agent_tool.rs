@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 pub(crate) const MULTI_AGENT_V2_NAMESPACE_DESCRIPTION: &str =
     "Tools for spawning and managing sub-agents.";
+pub(super) const DISCODEX_AGENT_NAMESPACE: &str = "discodex_agents";
 
 pub(super) fn multi_agent_v2_handler(
     handler: impl CoreToolRuntime + 'static,
