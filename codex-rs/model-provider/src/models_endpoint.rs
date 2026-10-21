@@ -28,12 +28,17 @@ use codex_model_provider_info::ModelProviderInfo;
 use codex_models_manager::manager::ModelsEndpointClient;
 use codex_models_manager::manager::ModelsEndpointFuture;
 use codex_models_manager::manager::ModelsEndpointResponse;
+use codex_models_manager::model_info::model_info_from_slug;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CoreResult;
+use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::openai_models::ModelVisibility;
+use codex_protocol::openai_models::ModelsResponse;
 use codex_response_debug_context::extract_response_debug_context;
 use codex_response_debug_context::telemetry_transport_error_message;
 use http::HeaderMap;
+use serde::Deserialize;
 use tokio::time::timeout;
 
 use crate::auth::ResolvedProviderAuth;
@@ -45,6 +50,66 @@ const MODELS_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 const MODELS_ENDPOINT: &str = "/models";
 // Bound downloads from explicitly configured catalogs before decoding or caching them.
 const MAX_MODEL_CATALOG_BYTES: usize = 1024 * 1024;
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ProviderModelsResponse {
+    Codex(ModelsResponse),
+    Compatible { data: Vec<CompatibleModel> },
+}
+
+#[derive(Deserialize)]
+struct CompatibleModel {
+    id: String,
+    context_window: Option<i64>,
+    context_length: Option<i64>,
+    max_model_len: Option<i64>,
+    meta: Option<CompatibleModelMeta>,
+}
+
+#[derive(Deserialize)]
+struct CompatibleModelMeta {
+    n_ctx: Option<i64>,
+}
+
+fn decode_models_response(body: &[u8]) -> Result<Vec<ModelInfo>, codex_api::ApiError> {
+    let response = serde_json::from_slice::<ProviderModelsResponse>(body).map_err(|error| {
+        codex_api::ApiError::Stream(format!(
+            "failed to decode models response: {:?} at line {} column {} (body: {} bytes)",
+            error.classify(),
+            error.line(),
+            error.column(),
+            body.len()
+        ))
+    })?;
+    Ok(match response {
+        ProviderModelsResponse::Codex(response) => response.models,
+        ProviderModelsResponse::Compatible { data } => data
+            .into_iter()
+            .map(|model| {
+                // Reuse Codex's unknown-model defaults for capabilities the provider
+                // does not advertise, while retaining its actual context capacity.
+                let context_window = [
+                    model.context_window,
+                    model.context_length,
+                    model.max_model_len,
+                    model.meta.and_then(|meta| meta.n_ctx),
+                ]
+                .into_iter()
+                .flatten()
+                .find(|limit| *limit > 0);
+                let mut info = model_info_from_slug(&model.id);
+                info.visibility = ModelVisibility::List;
+                info.used_fallback_model_metadata = false;
+                if let Some(context_window) = context_window {
+                    info.context_window = Some(context_window);
+                    info.max_context_window = Some(context_window);
+                }
+                info
+            })
+            .collect(),
+    })
+}
 
 /// Provider-owned OpenAI-compatible `/models` endpoint.
 #[derive(Debug)]
@@ -160,8 +225,8 @@ impl OpenAiModelsEndpoint {
                 .model_catalog_url
                 .as_ref()
                 .map(|_| MAX_MODEL_CATALOG_BYTES);
-            client
-                .list_models(request_url, HeaderMap::new(), response_body_limit_bytes)
+            let (body, etag) = client
+                .list_models_raw(request_url, HeaderMap::new(), response_body_limit_bytes)
                 .await
                 .map_err(|mut error| {
                     if self.provider_info.model_catalog_url.is_some()
@@ -178,7 +243,9 @@ impl OpenAiModelsEndpoint {
                         *body = None;
                     }
                     map_api_error(error)
-                })
+                })?;
+            let models = decode_models_response(&body).map_err(map_api_error)?;
+            Ok::<_, CodexErr>((models, etag))
         })
         .await
         .map_err(|_| CodexErr::RequestTimeout)??;
@@ -423,6 +490,124 @@ mod tests {
     use wiremock::matchers::method;
     use wiremock::matchers::path;
     use wiremock::matchers::query_param;
+
+    #[test]
+    fn compatible_catalog_uses_reported_context_capacity() {
+        let body = serde_json::to_vec(&serde_json::json!({"data": [
+            {"id": "window-model", "context_window": 65_536},
+            {"id": "length-model", "context_length": 131_072},
+            {"id": "max-length-model", "max_model_len": 163_840},
+            {"id": "llama-model", "meta": {"n_ctx": 98_304}},
+            {"id": "unspecified-model"}
+        ]}))
+        .unwrap();
+        let models = decode_models_response(&body).unwrap();
+        for (model, (slug, context_window)) in models.iter().zip([
+            ("window-model", 65_536),
+            ("length-model", 131_072),
+            ("max-length-model", 163_840),
+            ("llama-model", 98_304),
+        ]) {
+            assert_eq!(model.slug, slug);
+            assert_eq!(model.context_window, Some(context_window));
+            assert_eq!(model.max_context_window, Some(context_window));
+            assert_eq!(
+                model.usable_context_window(),
+                Some(context_window * 95 / 100)
+            );
+            assert_eq!(
+                model.auto_compact_token_limit(),
+                Some(context_window * 9 / 10)
+            );
+            assert_eq!(model.visibility, ModelVisibility::List);
+        }
+        let defaults = model_info_from_slug("unspecified-model");
+        assert_eq!(models[4].context_window, defaults.context_window);
+        assert_eq!(models[4].max_context_window, defaults.max_context_window);
+    }
+
+    #[test]
+    fn native_catalog_metadata_is_preserved() {
+        let mut model = model_info_from_slug("native-model");
+        model.used_fallback_model_metadata = false;
+        model.context_window = Some(400_000);
+        model.max_context_window = Some(800_000);
+        model.auto_compact_token_limit = Some(300_000);
+        model.effective_context_window_percent = 90;
+        let expected = ModelsResponse {
+            models: vec![model],
+        };
+        let body = serde_json::to_vec(&expected).unwrap();
+        assert_eq!(decode_models_response(&body).unwrap(), expected.models);
+    }
+
+    #[test]
+    fn compatible_catalog_ignores_unavailable_context_capacity() {
+        let body = serde_json::to_vec(&serde_json::json!({"data": [
+            {"id": "zero-model", "context_window": 0, "meta": {"n_ctx": 32_768}},
+            {"id": "unknown-model", "context_length": -1, "meta": null}
+        ]}))
+        .unwrap();
+        let models = decode_models_response(&body).unwrap();
+        assert_eq!(models[0].context_window, Some(32_768));
+        assert_eq!(
+            models[1].context_window,
+            model_info_from_slug("unknown-model").context_window
+        );
+        assert_eq!(
+            decode_models_response(br#"{"data":[]}"#).unwrap(),
+            Vec::new()
+        );
+        assert!(decode_models_response(br#"{"data":[{"context_length":32768}]}"#).is_err());
+    }
+
+    #[tokio::test]
+    async fn compatible_catalog_context_is_scoped_to_the_provider() {
+        let first = MockServer::start().await;
+        let second = MockServer::start().await;
+        let home = tempfile::tempdir().unwrap();
+        let auth = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("catalog-token"));
+        for (server, capacity) in [(&first, 65_536), (&second, 131_072)] {
+            Mock::given(method("GET"))
+                .and(path("/models"))
+                .and(header("authorization", "Bearer catalog-token"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "data": [{"id": "shared-model", "meta": {"n_ctx": capacity}}]
+                })))
+                .expect(1)
+                .mount(server)
+                .await;
+            let mut provider = provider_info_with_command_auth();
+            provider.base_url = Some(server.uri());
+            provider.http_headers = Some(std::collections::HashMap::from([(
+                RESIDENCY_HEADER_NAME.to_string(),
+                "us".into(),
+            )]));
+            let manager = OpenAiModelsManager::new(
+                home.path().to_path_buf(),
+                Arc::new(OpenAiModelsEndpoint::new(
+                    provider,
+                    Some(auth.clone()),
+                    None,
+                )),
+                Some(auth.clone()),
+            );
+            manager
+                .raw_model_catalog(
+                    RefreshStrategy::OnlineIfUncached,
+                    HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+                )
+                .await;
+            let info = manager
+                .get_model_info(
+                    "shared-model",
+                    &codex_models_manager::ModelsManagerConfig::default(),
+                )
+                .await;
+            assert_eq!(info.context_window, Some(capacity));
+            assert_eq!(info.max_context_window, Some(capacity));
+        }
+    }
 
     #[derive(Debug)]
     struct RecordingTransportBuilder {
