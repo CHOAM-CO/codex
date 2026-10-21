@@ -284,7 +284,16 @@ async fn run_compact_task_inner_impl(
     let mut retries = 0;
     // Reuse one client session so turn-scoped state (sticky routing and websocket incremental
     // request tracking) survives retries within this compact turn.
-    let mut client_session = sess.services.model_client.new_session();
+    let mut client_session = sess
+        .services
+        .model_client
+        .for_provider(
+            &turn_context.provider,
+            crate::cyber_access_program::ApiKeyCyberAccessPrograms::from_config(
+                &turn_context.config,
+            ),
+        )
+        .new_session();
     let compaction_response = loop {
         // Clone is required because of the loop
         let mut turn_input = history
@@ -320,7 +329,7 @@ async fn run_compact_task_inner_impl(
             &mut client_session,
             &responses_metadata,
             &prompt,
-            compaction_metadata.phase(),
+            compaction_metadata,
         )
         .await;
 
@@ -346,6 +355,14 @@ async fn run_compact_task_inner_impl(
                 return Err(e);
             }
             Err(e) if matches!(e.details(), CodexErrorDetails::ContextWindowExceeded) => {
+                if matches!(
+                    compaction_metadata.reason(),
+                    CompactionReason::ModelDownshift
+                ) {
+                    // Keep native transport retries, but do not discard source history to
+                    // force a model-transition compaction request into its context window.
+                    return Err(e);
+                }
                 if turn_input_len > 1 {
                     // Trim from the beginning to preserve cache (prefix-based) and keep recent messages intact.
                     error!(
@@ -379,13 +396,15 @@ async fn run_compact_task_inner_impl(
 
     let history_snapshot = sess.clone_history().await;
     let history_items = history_snapshot.annotated_items();
-    let summary_suffix = if matches!(compaction_metadata.phase(), CompactionPhase::PostTurn) {
+    let summary_suffix = if matches!(compaction_metadata.phase(), CompactionPhase::PostTurn)
+        || matches!(
+            compaction_metadata.reason(),
+            CompactionReason::ModelDownshift
+        ) {
         get_last_assistant_message_from_turn(compaction_response.output.iter())
             .filter(|summary| !summary.trim().is_empty())
             .ok_or_else(|| {
-                CodexErr::Stream(
-                    "Post-turn compaction completed without an assistant summary".to_string(),
-                )
+                CodexErr::Stream("Compaction completed without an assistant summary".to_string())
             })?
     } else {
         get_last_assistant_message_from_turn(history_snapshot.raw_items()).unwrap_or_default()
@@ -794,7 +813,7 @@ async fn drain_to_completed(
     client_session: &mut ModelClientSession,
     responses_metadata: &CodexResponsesMetadata,
     prompt: &Prompt,
-    phase: CompactionPhase,
+    compaction_metadata: CompactionTurnMetadata,
 ) -> CodexResult<CompactionResponse> {
     let mut stream = client_session
         .stream(
@@ -824,8 +843,13 @@ async fn drain_to_completed(
         };
         match event {
             Ok(ResponseEvent::OutputItemDone(item)) => {
-                if matches!(phase, CompactionPhase::PostTurn) {
-                    // Commit post-turn summaries only after success; failures must leave both
+                if matches!(compaction_metadata.phase(), CompactionPhase::PostTurn)
+                    || matches!(
+                        compaction_metadata.reason(),
+                        CompactionReason::ModelDownshift
+                    )
+                {
+                    // Commit buffered summaries only after success; failures must leave both
                     // the live history and persisted rollout intact.
                     output.push(item);
                 } else {
@@ -862,8 +886,23 @@ async fn drain_to_completed(
                     usage_metadata.as_ref(),
                 )
                 .await;
-                sess.update_token_usage_info(turn_context, token_usage.as_ref())
+                if matches!(
+                    compaction_metadata.reason(),
+                    CompactionReason::ModelDownshift
+                ) {
+                    // The summarized window is not installed yet. Account for this request,
+                    // but keep the source context size if summary validation/installation fails.
+                    sess.record_token_usage_info(
+                        turn_context,
+                        &turn_context.initial_settings,
+                        token_usage.as_ref(),
+                        crate::session::TokenUsageContext::SpendingOnly,
+                    )
                     .await?;
+                } else {
+                    sess.update_token_usage_info(turn_context, token_usage.as_ref())
+                        .await?;
+                }
                 return Ok(CompactionResponse {
                     response_id,
                     output,

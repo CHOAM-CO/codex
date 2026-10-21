@@ -136,7 +136,14 @@ async fn build_and_install_compaction(
             Ok(attempt) => (attempt, turn_context),
             Err(error) => {
                 let fallback_turn_context = &replacement_step_context.turn;
-                if !should_retry_with_current_model(&error, turn_context, fallback_turn_context) {
+                if matches!(
+                    compaction_metadata.reason(),
+                    CompactionReason::ModelDownshift
+                ) || !should_retry_with_current_model(
+                    &error,
+                    turn_context,
+                    fallback_turn_context,
+                ) {
                     return Err(error);
                 }
                 sess.set_last_known_step_context(replacement_step_context)

@@ -9,6 +9,7 @@ use crate::session::turn_context::TurnContext;
 use crate::state::TaskKind;
 use codex_features::Feature;
 use codex_model_provider::RemoteCompactionSupport;
+use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::user_input::UserInput;
@@ -42,6 +43,11 @@ impl SessionTask for CompactTask {
         );
         // Preparation errors must reach the task runner, which reports them to the client.
         session.emit_turn_started(&ctx, TaskKind::Compact).await;
+        if ctx.config.model_executor != codex_protocol::external_executor::ModelExecutor::Codex {
+            return Err(CodexErr::UnsupportedOperation(
+                "The current model uses an external executor, which does not support Codex context compaction.".to_string(),
+            ));
+        }
         let step_context = session
             .capture_step_context(Arc::clone(&ctx), &cancellation_token)
             .await?;

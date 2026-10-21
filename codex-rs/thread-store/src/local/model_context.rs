@@ -3,9 +3,11 @@
 use std::io;
 use std::path::Path;
 
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_protocol::protocol::TurnModelRuntime;
 use codex_rollout::ModelContextScan;
 use codex_rollout::ModelContextScanProgress;
 use codex_rollout::ReverseJsonlScanner;
@@ -174,12 +176,24 @@ async fn scan_model_context_from_lineage(
     }
 }
 
+struct LegacyModelRuntime {
+    reverse_index: usize,
+    /// Present for a checkpoint's previous settings, whose model can differ from its companion.
+    source_model: Option<String>,
+    runtime: Option<TurnModelRuntime>,
+    settings_fallback_found: bool,
+}
+
 fn scan_model_context_from_lineage_blocking(
     lineage: &RolloutLineage,
     session_meta: SessionMetaLine,
 ) -> io::Result<Vec<RolloutItem>> {
     let mut scan = ModelContextScan::default();
-    'segments: for segment in lineage.segments().iter().rev() {
+    let mut legacy_context_runtimes: Vec<LegacyModelRuntime> = Vec::new();
+    let mut item_count = 0;
+    let mut complete = false;
+    for segment in lineage.segments().iter().rev() {
+        let mut pending_runtime_indices: Vec<usize> = Vec::new();
         let file = codex_rollout::open_rollout_seekable_reader(segment.rollout_path.as_path())?;
         let mut scanner = match segment.end.map(|end| end.end_byte_offset) {
             Some(end_byte_offset) => ReverseJsonlScanner::new_at(file, end_byte_offset)?,
@@ -194,14 +208,133 @@ fn scan_model_context_from_lineage_blocking(
             if matches!(&line.item, RolloutItem::SessionMeta(_)) {
                 break;
             }
-            match scan.push(line.item) {
-                ModelContextScanProgress::Continue => {}
-                ModelContextScanProgress::Complete => break 'segments,
+            let source_context = match &line.item {
+                RolloutItem::TurnContext(context) => {
+                    Some((context.model.as_str(), context.model_runtime.as_ref()))
+                }
+                RolloutItem::Compacted(checkpoint) => checkpoint
+                    .resume_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.previous_turn_settings.as_ref())
+                    .and_then(|settings| {
+                        settings
+                            .model_runtime
+                            .as_ref()
+                            .map(|runtime| (settings.model.as_str(), Some(runtime)))
+                    }),
+                _ => None,
+            };
+            if let Some((model, runtime)) = source_context {
+                pending_runtime_indices.retain(|index| {
+                    let recovery = &mut legacy_context_runtimes[*index];
+                    if recovery.source_model.as_deref() == Some(model) {
+                        // A model can exist under multiple providers. Its actual turn is
+                        // stronger evidence than settings changed after that turn.
+                        recovery.source_model = None;
+                        recovery.runtime = runtime.cloned().or(segment.model_runtime.clone());
+                        runtime.is_none()
+                    } else {
+                        true
+                    }
+                });
             }
+            if let RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(settings)) = &line.item
+                && (settings.thread_id == Some(segment.thread_id)
+                    || settings.thread_id.is_none() && segment.accepts_unowned_settings)
+            {
+                pending_runtime_indices.retain(|index| {
+                    let recovery = &mut legacy_context_runtimes[*index];
+                    if let Some(model) = &recovery.source_model {
+                        if !recovery.settings_fallback_found {
+                            recovery.settings_fallback_found =
+                                model == &settings.thread_settings.model;
+                            recovery.runtime =
+                                recovery.settings_fallback_found.then(|| TurnModelRuntime {
+                                    model_provider: settings
+                                        .thread_settings
+                                        .model_provider_id
+                                        .clone(),
+                                    model_executor: settings
+                                        .thread_settings
+                                        .model_executor
+                                        .unwrap_or_default(),
+                                    model_context_window: None,
+                                });
+                        }
+                        // Keep looking for the checkpoint's actual preceding turn.
+                        return true;
+                    }
+                    recovery.runtime = Some(TurnModelRuntime {
+                        model_provider: settings.thread_settings.model_provider_id.clone(),
+                        model_executor: settings.thread_settings.model_executor.unwrap_or_default(),
+                        model_context_window: None,
+                    });
+                    false
+                });
+            }
+            if complete {
+                // Only a legacy context missing its runtime needs to look before a safe
+                // history checkpoint. Recover its preceding settings without replaying history.
+                if pending_runtime_indices.is_empty() {
+                    break;
+                }
+                continue;
+            }
+            if let RolloutItem::TurnContext(context) = &line.item
+                && context.model_runtime.is_none()
+            {
+                pending_runtime_indices.push(legacy_context_runtimes.len());
+                legacy_context_runtimes.push(LegacyModelRuntime {
+                    reverse_index: item_count,
+                    source_model: None,
+                    runtime: segment.model_runtime.clone(),
+                    settings_fallback_found: false,
+                });
+            }
+            if let RolloutItem::Compacted(checkpoint) = &line.item
+                && let Some(settings) = checkpoint
+                    .resume_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.previous_turn_settings.as_ref())
+                && settings.model_runtime.is_none()
+            {
+                pending_runtime_indices.push(legacy_context_runtimes.len());
+                legacy_context_runtimes.push(LegacyModelRuntime {
+                    reverse_index: item_count,
+                    source_model: Some(settings.model.clone()),
+                    runtime: segment.model_runtime.clone(),
+                    settings_fallback_found: false,
+                });
+            }
+            item_count += 1;
+            complete = matches!(scan.push(line.item), ModelContextScanProgress::Complete);
+            if complete && pending_runtime_indices.is_empty() {
+                break;
+            }
+        }
+        if complete {
+            break;
         }
     }
 
     let mut items = scan.finish();
+    for recovery in legacy_context_runtimes {
+        let index = items.len() - recovery.reverse_index - 1;
+        // The canonical child header below must never supply an inherited turn's runtime.
+        match &mut items[index] {
+            RolloutItem::TurnContext(context) => context.model_runtime = recovery.runtime,
+            RolloutItem::Compacted(checkpoint) => {
+                if let Some(settings) = checkpoint
+                    .resume_metadata
+                    .as_mut()
+                    .and_then(|metadata| metadata.previous_turn_settings.as_mut())
+                {
+                    settings.model_runtime = recovery.runtime;
+                }
+            }
+            _ => {}
+        }
+    }
     items.insert(0, RolloutItem::SessionMeta(session_meta));
     Ok(items)
 }

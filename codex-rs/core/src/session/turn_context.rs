@@ -22,6 +22,7 @@ use codex_file_system::EnvironmentAccess;
 use codex_file_system::FileSystemEnvironmentAccessor;
 use codex_file_system::FileSystemSandboxContext;
 use codex_model_provider::SharedModelProvider;
+use codex_model_provider::create_model_provider;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ShellEnvironmentPolicy;
@@ -35,6 +36,7 @@ use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::TurnEnvironmentSelection;
+use codex_protocol::protocol::TurnModelRuntime;
 use codex_protocol::sandbox::SandboxOverride;
 use codex_protocol::turn_input::CyberAccessProgram;
 use codex_sandboxing::policy_transforms::effective_permission_profile;
@@ -756,6 +758,14 @@ impl TurnContext {
         self.model_info().usable_context_window()
     }
 
+    pub(crate) fn model_runtime(&self) -> TurnModelRuntime {
+        TurnModelRuntime {
+            model_provider: self.config.model_provider_id.clone(),
+            model_executor: self.config.model_executor,
+            model_context_window: self.model_context_window(),
+        }
+    }
+
     pub(crate) fn apps_enabled(&self) -> bool {
         let uses_codex_backend = self
             .auth_manager
@@ -767,16 +777,83 @@ impl TurnContext {
             && self.config.orchestrator_mcp_enabled
     }
 
+    #[cfg(test)]
     pub(crate) async fn with_model(
         &self,
         model: String,
         models_manager: &SharedModelsManager,
     ) -> Self {
+        self.with_model_config(model, (*self.config).clone(), None, models_manager)
+            .await
+    }
+
+    /// Restore the runtime that actually produced the history being compacted. In particular,
+    /// the previous model must not be routed through the newly selected provider.
+    pub(crate) async fn with_model_runtime(
+        &self,
+        model: String,
+        runtime: &TurnModelRuntime,
+        models_manager: &SharedModelsManager,
+    ) -> CodexResult<Self> {
         let mut config = (*self.config).clone();
+        config.model_provider = config
+            .model_providers
+            .get(&runtime.model_provider)
+            .cloned()
+            .ok_or_else(|| CodexErr::InvalidRequest(format!(
+                "Cannot compact with previous model {model}: provider {} is no longer configured",
+                runtime.model_provider
+            )))?;
+        config.model_provider_id = runtime.model_provider.clone();
+        config.model_executor = runtime.model_executor;
+        // Overrides now belong to the destination model. Previous-turn metadata is already
+        // the resolved usable window, so do not apply the destination override or reserve twice.
+        config.model_context_window = None;
+        config.model_auto_compact_token_limit = None;
+        let source_models_manager;
+        let models_manager = if self.provider.info() == &config.model_provider {
+            models_manager
+        } else {
+            let provider =
+                create_model_provider(config.model_provider.clone(), self.auth_manager.clone());
+            source_models_manager = provider.models_manager(
+                config.codex_home.to_path_buf(),
+                config.model_catalog.clone(),
+            );
+            source_models_manager.set_api_key_model_discovery_enabled(
+                config.features.enabled(Feature::ApiKeyModelDiscovery),
+            );
+            // Provider-specific discovery/cache identity prevents equal model slugs from
+            // borrowing the destination's prompt, capabilities, or reasoning metadata.
+            source_models_manager
+                .list_models(
+                    RefreshStrategy::OnlineIfUncached,
+                    config.http_client_factory(),
+                )
+                .await;
+            &source_models_manager
+        };
+        Ok(self
+            .with_model_config(model, config, runtime.model_context_window, models_manager)
+            .await)
+    }
+
+    async fn with_model_config(
+        &self,
+        model: String,
+        mut config: Config,
+        usable_context_window: Option<i64>,
+        models_manager: &SharedModelsManager,
+    ) -> Self {
         config.model = Some(model.clone());
-        let model_info = models_manager
+        let mut model_info = models_manager
             .get_model_info(model.as_str(), &config.to_models_manager_config())
             .await;
+        if let Some(context_window) = usable_context_window {
+            model_info.context_window = Some(context_window);
+            model_info.max_context_window = Some(context_window);
+            model_info.effective_context_window_percent = 100;
+        }
         let supported_reasoning_levels = model_info
             .supported_reasoning_levels
             .iter()
@@ -819,6 +896,11 @@ impl TurnContext {
         ));
         config.service_tier = step_settings.service_tier.clone();
         let session_telemetry = step_settings.telemetry(&self.session_telemetry);
+        let provider = if self.provider.info() == &config.model_provider {
+            self.provider.clone()
+        } else {
+            create_model_provider(config.model_provider.clone(), self.auth_manager.clone())
+        };
 
         Self {
             sub_id: self.sub_id.clone(),
@@ -834,7 +916,7 @@ impl TurnContext {
             active_host_plugin_identities: self.active_host_plugin_identities.clone(),
             next_step_settings: ArcSwap::from(step_settings),
             session_telemetry,
-            provider: self.provider.clone(),
+            provider,
             session_source: self.session_source.clone(),
             history_mode: self.history_mode,
             parent_thread_id: self.parent_thread_id,
@@ -905,6 +987,7 @@ impl TurnContext {
             ),
             file_system_sandbox_policy: self.non_legacy_file_system_sandbox_policy(),
             model: self.model_info().slug.clone(),
+            model_runtime: Some(self.model_runtime()),
             comp_hash: self.model_info().comp_hash.clone(),
             collaboration_mode: Some(self.collaboration_mode()),
             multi_agent_version: Some(self.multi_agent_version),

@@ -622,6 +622,47 @@ impl ModelClient {
         self
     }
 
+    /// Use another configured provider for a previous-model compaction without carrying the
+    /// destination provider's connection, authentication recovery, or tool cache across routes.
+    pub(crate) fn for_provider(
+        &self,
+        provider: &SharedModelProvider,
+        api_key_cyber_access_programs: cyber_access_program::ApiKeyCyberAccessPrograms,
+    ) -> Self {
+        if self.provider_info() == provider.info() {
+            let mut client = self.clone();
+            client.api_key_cyber_access_programs = api_key_cyber_access_programs;
+            return client;
+        }
+        let mut client = Self::new(
+            provider.auth_manager(),
+            self.agent_identity_policy,
+            self.state.thread_id,
+            provider.info().clone(),
+            self.state.session_source.clone(),
+            self.state.originator.clone(),
+            self.state.model_verbosity,
+            self.state.content_item_kinds_enabled,
+            self.state.reasoning_effort_override_enabled,
+            self.state.enable_request_compression,
+            self.state.include_timing_metrics,
+            self.state.beta_features_header.clone(),
+            self.state.concurrent_reasoning_summaries_enabled,
+            self.state.output_token_replay_enabled,
+            self.state.attestation_provider.clone(),
+            self.http_client_factory.clone(),
+            self.state.workspace_routing.clone(),
+            self.request_contributors.clone(),
+        );
+        client.prompt_cache_key_override = self.prompt_cache_key_override.clone();
+        client.codex_responses_headers = self.codex_responses_headers.clone();
+        client.event_sender = self.event_sender.clone();
+        client.restored_history = self.restored_history;
+        client.executed_tool_calls = self.executed_tool_calls.clone();
+        client.api_key_cyber_access_programs = api_key_cyber_access_programs;
+        client
+    }
+
     pub(crate) fn reasoning_effort_override_enabled(&self, model_info: &ModelInfo) -> bool {
         self.state.reasoning_effort_override_enabled
             && self.state.provider.info().is_openai()

@@ -3419,6 +3419,16 @@ impl WorldStateItem {
     }
 }
 
+/// Runtime that produced a persisted turn, retained when resuming or forking into another model.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, TS)]
+pub struct TurnModelRuntime {
+    pub model_provider: String,
+    pub model_executor: crate::external_executor::ModelExecutor,
+    /// Usable context window after the model's effective-window adjustment, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_context_window: Option<i64>,
+}
+
 /// Persist once per real user turn after computing that turn's model-visible
 /// context updates, and again after mid-turn compaction when replacement
 /// history re-establishes full context, so resume/fork replay can recover the
@@ -3448,6 +3458,8 @@ pub struct TurnContextItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_system_sandbox_policy: Option<RawFileSystemSandboxPolicy>,
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_runtime: Option<TurnModelRuntime>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comp_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -6315,7 +6327,44 @@ mod tests {
         assert_eq!(item.summary, None);
         assert_eq!(item.file_system_sandbox_policy, None);
         assert_eq!(item.comp_hash, None);
+        assert_eq!(item.model_runtime, None);
         assert_eq!(serde_json::to_value(item)?.get("summary"), None);
+        Ok(())
+    }
+
+    #[test]
+    fn turn_context_item_round_trips_model_runtime() -> Result<()> {
+        let mut value = json!({
+            "cwd": test_path_buf("/tmp"),
+            "approval_policy": "on-request",
+            "sandbox_policy": { "type": "danger-full-access" },
+            "model": "source-model",
+            "model_runtime": {
+                "model_provider": "source-provider",
+                "model_executor": "antigravity",
+                "model_context_window": 256_000
+            }
+        });
+        let item: TurnContextItem = serde_json::from_value(value.clone())?;
+        assert_eq!(
+            item.model_runtime,
+            Some(TurnModelRuntime {
+                model_provider: "source-provider".to_owned(),
+                model_executor: crate::external_executor::ModelExecutor::Antigravity,
+                model_context_window: Some(256_000),
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(item)?["model_runtime"],
+            value["model_runtime"]
+        );
+
+        value["model_runtime"]
+            .as_object_mut()
+            .unwrap()
+            .remove("model_context_window");
+        let item: TurnContextItem = serde_json::from_value(value)?;
+        assert_eq!(item.model_runtime.unwrap().model_context_window, None);
         Ok(())
     }
 
@@ -6357,6 +6406,7 @@ mod tests {
                 .expect("serializable split policy"),
             ),
             model: "gpt-5".to_string(),
+            model_runtime: None,
             comp_hash: None,
             collaboration_mode: None,
             multi_agent_version: None,

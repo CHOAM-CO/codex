@@ -5,6 +5,7 @@ use codex_history::ResponseItemEnvelope;
 use codex_history::TurnAttribution;
 use codex_protocol::protocol::SessionContextWindow;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_protocol::protocol::TurnModelRuntime;
 use codex_utils_output_truncation::TruncationPolicy;
 use uuid::Uuid;
 
@@ -230,6 +231,54 @@ impl ContextManager {
         };
         let input_checkpoint = select_input_compaction(rollout_items, history_mode);
         let replay_items = input_checkpoint.map_or(rollout_items, |checkpoint| checkpoint.suffix);
+        // Keep the source runtime at its original position: future child metadata and
+        // settings changes cannot describe an earlier inherited turn.
+        let mut runtime_checkpoints = Vec::new();
+        let mut runtime_owner = None;
+        let mut accepts_legacy_settings = false;
+        for (index, item) in rollout_items.iter().enumerate() {
+            match item {
+                RolloutItem::SessionMeta(metadata) => {
+                    runtime_owner = Some(metadata.meta.id);
+                    // Canonical fork headers cannot identify providers of inherited legacy
+                    // turns. Lineage readers enrich those contexts before replacing headers.
+                    accepts_legacy_settings = metadata.meta.forked_from_id.is_none()
+                        && metadata.meta.history_base.is_none()
+                        && metadata.meta.subagent_history_start_ordinal.is_none();
+                    runtime_checkpoints.push((
+                        index,
+                        None,
+                        accepts_legacy_settings
+                            .then_some(metadata.meta.model_provider.as_ref())
+                            .flatten()
+                            .map(|provider| TurnModelRuntime {
+                                model_provider: provider.clone(),
+                                model_executor: metadata.meta.model_executor.unwrap_or_default(),
+                                model_context_window: None,
+                            }),
+                    ));
+                }
+                RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event))
+                    if event.thread_id.is_some() && event.thread_id == runtime_owner
+                        || event.thread_id.is_none() && accepts_legacy_settings =>
+                {
+                    runtime_checkpoints.push((
+                        index,
+                        Some(event.thread_settings.model.as_str()),
+                        Some(TurnModelRuntime {
+                            model_provider: event.thread_settings.model_provider_id.clone(),
+                            model_executor: event
+                                .thread_settings
+                                .model_executor
+                                .unwrap_or_default(),
+                            model_context_window: None,
+                        }),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        let replay_offset = rollout_items.len() - replay_items.len();
         let resume_metadata =
             input_checkpoint.and_then(|checkpoint| checkpoint.compacted.resume_metadata.as_ref());
         let mut history_checkpoint = input_checkpoint;
@@ -369,6 +418,15 @@ impl ContextManager {
                     ) {
                         active_segment.previous_turn_settings = Some(PreviousTurnSettings {
                             model: ctx.model.clone(),
+                            model_runtime: ctx.model_runtime.clone().or_else(|| {
+                                let preceding_metadata_count =
+                                    runtime_checkpoints.partition_point(|(position, _, _)| {
+                                        *position < replay_offset + index
+                                    });
+                                preceding_metadata_count
+                                    .checked_sub(1)
+                                    .and_then(|position| runtime_checkpoints[position].2.clone())
+                            }),
                             cyber_access_program: ctx.cyber_access_program,
                             comp_hash: ctx.comp_hash.clone(),
                             realtime_active: ctx.realtime_active,
@@ -477,8 +535,58 @@ impl ContextManager {
         }
 
         if previous_turn_settings.is_none() {
-            previous_turn_settings =
-                resume_metadata.and_then(|metadata| metadata.previous_turn_settings.clone());
+            previous_turn_settings = resume_metadata
+                .and_then(|metadata| metadata.previous_turn_settings.clone())
+                .map(|mut settings| {
+                    if settings.model_runtime.is_none() {
+                        let checkpoint_index = rollout_items.len() - replay_items.len() - 1;
+                        let context_runtime = rollout_items[..checkpoint_index]
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .find_map(|(index, item)| match item {
+                                RolloutItem::TurnContext(context)
+                                    if context.model == settings.model =>
+                                {
+                                    Some(context.model_runtime.clone().or_else(|| {
+                                        let count = runtime_checkpoints
+                                            .partition_point(|(position, _, _)| *position < index);
+                                        count.checked_sub(1).and_then(|position| {
+                                            runtime_checkpoints[position].2.clone()
+                                        })
+                                    }))
+                                }
+                                _ => None,
+                            })
+                            .flatten();
+                        settings.model_runtime = context_runtime.or_else(|| {
+                            let mut conflicting_settings = false;
+                            runtime_checkpoints
+                                .iter()
+                                .rev()
+                                .find_map(|(index, model, runtime)| {
+                                    if *index >= checkpoint_index {
+                                        return None;
+                                    }
+                                    if let Some(model) = model {
+                                        if *model == settings.model {
+                                            return Some(runtime.clone());
+                                        }
+                                        conflicting_settings = true;
+                                    } else {
+                                        return Some(
+                                            (!conflicting_settings)
+                                                .then(|| runtime.clone())
+                                                .flatten(),
+                                        );
+                                    }
+                                    None
+                                })
+                                .flatten()
+                        });
+                    }
+                    settings
+                });
         }
 
         let fallback_window_number = u64::try_from(

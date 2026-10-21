@@ -358,6 +358,281 @@ async fn returns_scanned_full_history_at_bof_without_checkpoint() {
 }
 
 #[tokio::test]
+async fn lineage_retains_legacy_source_runtime_before_replacing_session_metadata() {
+    use codex_protocol::external_executor::ModelExecutor;
+    use codex_protocol::protocol::TurnModelRuntime;
+
+    for (provider, explicit_runtime, copied_fork) in [
+        (Some("source-provider"), false, false),
+        (None, false, false),
+        (Some("creation-provider"), true, false),
+        (Some("child-provider"), false, true),
+    ] {
+        let home = TempDir::new().expect("temp dir");
+        let root_uuid = Uuid::from_u128(2101);
+        let root_id = ThreadId::from_string(&root_uuid.to_string()).unwrap();
+        let expected_runtime = if explicit_runtime {
+            Some(TurnModelRuntime {
+                model_provider: "selected-provider".to_owned(),
+                model_executor: ModelExecutor::Codex,
+                model_context_window: Some(256_000),
+            })
+        } else if copied_fork {
+            None
+        } else {
+            provider.map(|provider| TurnModelRuntime {
+                model_provider: provider.to_owned(),
+                model_executor: ModelExecutor::Antigravity,
+                model_context_window: None,
+            })
+        };
+        let RolloutItem::TurnContext(mut source_context) = turn_context(home.path(), "source")
+        else {
+            unreachable!();
+        };
+        source_context.model_runtime = explicit_runtime.then(|| expected_runtime.clone()).flatten();
+        let root_path = write_ordinaled_paginated_rollout(
+            home.path(),
+            "2025-01-03T13-02-00",
+            root_uuid,
+            [
+                turn_started("source"),
+                user_message("source work"),
+                RolloutItem::TurnContext(source_context),
+                turn_complete("source"),
+            ],
+        );
+        edit_session_meta(&root_path, |meta| {
+            meta["model_provider"] = serde_json::json!(provider);
+            meta["model_executor"] = serde_json::json!("antigravity");
+            if copied_fork {
+                meta["forked_from_id"] = serde_json::json!(ThreadId::default());
+            }
+        });
+        let original_root = std::fs::read(&root_path).unwrap();
+        let child_uuid = Uuid::from_u128(2102);
+        let child_id = ThreadId::from_string(&child_uuid.to_string()).unwrap();
+        let child_path =
+            write_ordinaled_paginated_rollout(home.path(), "2025-01-03T13-02-01", child_uuid, []);
+        set_history_base(&child_path, history_position(&root_path, root_id, 5));
+        let store = LocalThreadStore::new(test_config(home.path()), None);
+        let context = store
+            .load_latest_model_context(LoadThreadHistoryParams {
+                thread_id: child_id,
+                include_archived: false,
+            })
+            .await
+            .unwrap();
+
+        let RolloutItem::SessionMeta(meta) = &context.items[0] else {
+            panic!("canonical header");
+        };
+        assert_eq!(meta.meta.id, child_id);
+        assert_eq!(meta.meta.model_provider.as_deref(), Some("test-provider"));
+        let restored_runtime = context
+            .items
+            .iter()
+            .find_map(|item| match item {
+                RolloutItem::TurnContext(context) => Some(context.model_runtime.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(restored_runtime, expected_runtime);
+        assert_eq!(std::fs::read(root_path).unwrap(), original_root);
+    }
+}
+
+#[tokio::test]
+async fn lineage_recovers_owned_runtime_before_compaction_without_replaying_older_history() {
+    for (unowned, previous_settings) in [(false, false), (true, false), (false, true)] {
+        let home = TempDir::new().expect("temp dir");
+        let source_uuid = Uuid::from_u128(2201);
+        let source_id = ThreadId::from_string(&source_uuid.to_string()).unwrap();
+        let settings = |owner: Option<ThreadId>, provider: &str| {
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(serde_json::from_value(
+            serde_json::json!({
+                "thread_id": owner,
+                "thread_settings": {
+                    "model": "test-model",
+                    "model_provider_id": provider,
+                    "model_executor": "antigravity",
+                    "approval_policy": "on-request",
+                    "approvals_reviewer": "user",
+                    "permission_profile": codex_protocol::models::PermissionProfile::read_only(),
+                    "cwd": home.path(),
+                    "collaboration_mode": {"mode": "default", "settings": {"model": "test-model"}}
+                }
+            }),
+        ).unwrap()))
+        };
+        let RolloutItem::TurnContext(mut source_context) = turn_context(home.path(), "source")
+        else {
+            unreachable!();
+        };
+        source_context.model_runtime = None;
+        if previous_settings {
+            source_context.model = "target-model".to_owned();
+            source_context.model_runtime = Some(codex_protocol::protocol::TurnModelRuntime {
+                model_provider: "target-provider".to_owned(),
+                model_executor: codex_protocol::external_executor::ModelExecutor::Codex,
+                model_context_window: Some(128_000),
+            });
+        }
+        let mut checkpoint = compacted("source summary", Some(Vec::new()));
+        if previous_settings && let RolloutItem::Compacted(checkpoint) = &mut checkpoint {
+            checkpoint.resume_metadata = Some(
+                serde_json::from_value(serde_json::json!({
+                    "previous_turn_settings": {"model": "test-model"}
+                }))
+                .unwrap(),
+            );
+        }
+        let source_path = write_ordinaled_paginated_rollout(
+            home.path(),
+            "2025-01-03T13-03-00",
+            source_uuid,
+            [
+                settings((!unowned).then_some(source_id), "selected-provider"),
+                settings(Some(ThreadId::default()), "foreign-provider"),
+                turn_started("source"),
+                user_message("older history"),
+                checkpoint.clone(),
+                RolloutItem::TurnContext(source_context.clone()),
+                turn_complete("source"),
+                settings(Some(source_id), "future-provider"),
+            ],
+        );
+        let child_uuid = Uuid::from_u128(2202);
+        let child_id = ThreadId::from_string(&child_uuid.to_string()).unwrap();
+        let child_path =
+            write_ordinaled_paginated_rollout(home.path(), "2025-01-03T13-03-01", child_uuid, []);
+        set_history_base(&child_path, history_position(&source_path, source_id, 9));
+        let store = LocalThreadStore::new(test_config(home.path()), None);
+        let context = store
+            .load_latest_model_context(LoadThreadHistoryParams {
+                thread_id: child_id,
+                include_archived: false,
+            })
+            .await
+            .unwrap();
+        let expected_source_runtime = Some(codex_protocol::protocol::TurnModelRuntime {
+            model_provider: "selected-provider".to_owned(),
+            model_executor: codex_protocol::external_executor::ModelExecutor::Antigravity,
+            model_context_window: None,
+        });
+        if previous_settings {
+            let RolloutItem::Compacted(checkpoint) = &mut checkpoint else {
+                unreachable!();
+            };
+            checkpoint
+                .resume_metadata
+                .as_mut()
+                .unwrap()
+                .previous_turn_settings
+                .as_mut()
+                .unwrap()
+                .model_runtime = expected_source_runtime;
+        } else {
+            source_context.model_runtime = expected_source_runtime;
+        }
+        assert_eq!(
+            serde_json::to_value(&context.items[1..]).unwrap(),
+            serde_json::to_value([
+                checkpoint,
+                RolloutItem::TurnContext(source_context),
+                turn_complete("source"),
+                settings(Some(source_id), "future-provider"),
+            ])
+            .unwrap()
+        );
+    }
+}
+
+#[tokio::test]
+async fn checkpoint_runtime_uses_actual_turn_before_same_model_provider_change() {
+    use codex_protocol::external_executor::ModelExecutor;
+    use codex_protocol::protocol::TurnModelRuntime;
+
+    for legacy_context in [false, true] {
+        let home = TempDir::new().expect("temp dir");
+        let source_uuid = Uuid::from_u128(2301);
+        let source_id = ThreadId::from_string(&source_uuid.to_string()).unwrap();
+        let settings = |provider: &str| {
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(
+                serde_json::from_value(serde_json::json!({
+                    "thread_id": source_id,
+                    "thread_settings": {
+                        "model": "test-model",
+                        "model_provider_id": provider,
+                        "model_executor": "codex",
+                        "approval_policy": "on-request",
+                        "approvals_reviewer": "user",
+                        "permission_profile": codex_protocol::models::PermissionProfile::read_only(),
+                        "cwd": home.path(),
+                        "collaboration_mode": {"mode": "default", "settings": {"model": "test-model"}}
+                    }
+                }))
+                .unwrap(),
+            ))
+        };
+        let expected_runtime = TurnModelRuntime {
+            model_provider: "source-provider".to_owned(),
+            model_executor: ModelExecutor::Codex,
+            model_context_window: (!legacy_context).then_some(256_000),
+        };
+        let RolloutItem::TurnContext(mut source_context) = turn_context(home.path(), "source")
+        else {
+            unreachable!();
+        };
+        source_context.model_runtime = (!legacy_context).then(|| expected_runtime.clone());
+        let mut checkpoint = compacted("source summary", Some(Vec::new()));
+        let RolloutItem::Compacted(compaction) = &mut checkpoint else {
+            unreachable!();
+        };
+        compaction.resume_metadata = Some(
+            serde_json::from_value(serde_json::json!({
+                "previous_turn_settings": {"model": "test-model"}
+            }))
+            .unwrap(),
+        );
+        write_ordinaled_paginated_rollout(
+            home.path(),
+            "2025-01-03T13-04-00",
+            source_uuid,
+            [
+                settings("source-provider"),
+                RolloutItem::TurnContext(source_context),
+                settings("target-provider"),
+                checkpoint,
+            ],
+        );
+        let store = LocalThreadStore::new(test_config(home.path()), None);
+        let context = store
+            .load_latest_model_context(LoadThreadHistoryParams {
+                thread_id: source_id,
+                include_archived: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(context.items.len(), 2);
+        let RolloutItem::Compacted(checkpoint) = &context.items[1] else {
+            panic!("checkpoint only, without earlier history");
+        };
+        assert_eq!(
+            checkpoint
+                .resume_metadata
+                .as_ref()
+                .unwrap()
+                .previous_turn_settings
+                .as_ref()
+                .unwrap()
+                .model_runtime,
+            Some(expected_runtime),
+        );
+    }
+}
+
+#[tokio::test]
 async fn replays_nested_archived_lineage_from_frozen_prefix() {
     let home = TempDir::new().expect("temp dir");
     let root_uuid = Uuid::from_u128(/*v*/ 2001);
@@ -531,12 +806,17 @@ fn write_ordinaled_paginated_rollout<const N: usize>(
 }
 
 fn set_history_base(path: &Path, history_base: HistoryPosition) {
+    edit_session_meta(path, |meta| {
+        meta["history_base"] = serde_json::to_value(history_base).expect("serialize history base");
+    });
+}
+
+fn edit_session_meta(path: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
     let contents = std::fs::read_to_string(path).expect("read rollout");
     let mut lines = contents.lines();
     let mut head: serde_json::Value =
         serde_json::from_str(lines.next().expect("session meta line")).expect("parse head");
-    head["payload"]["history_base"] =
-        serde_json::to_value(history_base).expect("serialize history base");
+    edit(&mut head["payload"]);
     let mut updated = serde_json::to_string(&head).expect("serialize head");
     for line in lines {
         updated.push('\n');
@@ -692,6 +972,11 @@ fn turn_context(root: &Path, turn_id: &str) -> RolloutItem {
         active_permission_profile: None,
         file_system_sandbox_policy: None,
         model: "test-model".to_string(),
+        model_runtime: Some(codex_protocol::protocol::TurnModelRuntime {
+            model_provider: "test-provider".to_owned(),
+            model_executor: codex_protocol::external_executor::ModelExecutor::Codex,
+            model_context_window: None,
+        }),
         comp_hash: None,
         collaboration_mode: None,
         multi_agent_version: None,

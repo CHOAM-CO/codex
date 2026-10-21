@@ -4372,6 +4372,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
         active_permission_profile: None,
         file_system_sandbox_policy: None,
         model: previous_model.to_string(),
+        model_runtime: None,
         comp_hash: None,
         collaboration_mode: Some(turn_context.collaboration_mode()),
         multi_agent_version: None,
@@ -4430,6 +4431,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
         session.previous_turn_settings().await,
         Some(PreviousTurnSettings {
             model: previous_model.to_string(),
+            model_runtime: None,
             comp_hash: None,
             cyber_access_program: None,
             realtime_active: Some(turn_context.realtime_active),
@@ -6201,6 +6203,7 @@ async fn compaction_persists_resume_metadata_and_companion_records() {
     let world_state = Arc::new(build_world_state_from_turn_context(&session, &turn_context).await);
     let previous_turn_settings = PreviousTurnSettings {
         model: "previous-model".to_string(),
+        model_runtime: None,
         comp_hash: Some("comp-hash".to_string()),
         cyber_access_program: None,
         realtime_active: Some(true),
@@ -11007,6 +11010,7 @@ async fn build_initial_context_restates_realtime_start_when_reference_context_is
     turn_context.realtime_active = true;
     let previous_turn_settings = PreviousTurnSettings {
         model: turn_context.model_info().slug.clone(),
+        model_runtime: None,
         comp_hash: None,
         cyber_access_program: None,
         realtime_active: Some(true),
@@ -11376,6 +11380,7 @@ async fn build_initial_context_uses_retained_step_after_model_change() {
     session
         .set_previous_turn_settings(Some(PreviousTurnSettings {
             model: "base-model".to_string(),
+            model_runtime: None,
             comp_hash: None,
             cyber_access_program: None,
             realtime_active: None,
@@ -11480,6 +11485,7 @@ async fn build_initial_context_prepends_model_switch_message() {
     let (session, turn_context) = make_session_and_context().await;
     let previous_turn_settings = PreviousTurnSettings {
         model: "previous-regular-model".to_string(),
+        model_runtime: None,
         comp_hash: None,
         cyber_access_program: None,
         realtime_active: None,
@@ -11535,6 +11541,7 @@ async fn record_context_updates_and_set_reference_context_item_persists_full_rei
     session
         .set_previous_turn_settings(Some(PreviousTurnSettings {
             model: previous_context.model_info().slug.clone(),
+            model_runtime: None,
             comp_hash: None,
             cyber_access_program: None,
             realtime_active: Some(previous_context.realtime_active),
@@ -12115,6 +12122,7 @@ async fn interrupting_compaction_fallback_retains_last_known_step_context() {
     session
         .set_previous_turn_settings(Some(PreviousTurnSettings {
             model: "gpt-5.4".to_string(),
+            model_runtime: None,
             comp_hash: Some("old".to_string()),
             cyber_access_program: None,
             realtime_active: Some(turn.realtime_active),

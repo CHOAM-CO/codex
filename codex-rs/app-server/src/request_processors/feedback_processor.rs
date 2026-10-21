@@ -771,6 +771,7 @@ mod tests {
                     active_permission_profile: None,
                     file_system_sandbox_policy: None,
                     model: (*model).to_string(),
+                    model_runtime: None,
                     comp_hash: None,
                     collaboration_mode: None,
                     multi_agent_version: None,

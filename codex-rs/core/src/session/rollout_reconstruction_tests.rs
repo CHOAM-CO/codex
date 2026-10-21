@@ -18,12 +18,14 @@ use codex_protocol::protocol::SessionContextWindow;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::ThreadRolledBackEvent;
+use codex_protocol::protocol::TurnModelRuntime;
 use codex_protocol::protocol::WorldStateItem;
 use codex_protocol::security_risk::SecurityRiskScore;
 use codex_protocol::turn_input::CyberAccessProgram;
 use codex_rollout::ModelContextScan;
 use codex_rollout::ModelContextScanProgress;
 use core_test_support::responses::strip_metadata_from_items;
+use core_test_support::responses::strip_response_item_ids;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -307,6 +309,310 @@ fn completed_user_turn_rollout(
     rollout_items
 }
 
+#[test_case(false, false; "resume persisted source runtime")]
+#[test_case(true, false; "resume legacy source session metadata")]
+#[test_case(false, true; "fork persisted source runtime")]
+#[test_case(true, true; "fork legacy source session metadata")]
+#[tokio::test]
+async fn reconstruct_history_preserves_source_runtime_before_child_metadata(
+    legacy: bool,
+    fork: bool,
+) {
+    use codex_protocol::external_executor::ModelExecutor;
+
+    let (session, turn_context) = make_session_and_context().await;
+    let expected_runtime = TurnModelRuntime {
+        model_provider: "parent-provider".to_owned(),
+        model_executor: ModelExecutor::Antigravity,
+        model_context_window: (!legacy).then_some(256_000),
+    };
+    let mut context = turn_context.to_turn_context_item();
+    context.model = "parent-model".to_owned();
+    context.model_runtime = (!legacy).then(|| expected_runtime.clone());
+    let mut rollout = vec![RolloutItem::SessionMeta(SessionMetaLine {
+        meta: SessionMeta {
+            model_provider: Some(
+                if legacy {
+                    "parent-provider"
+                } else {
+                    "creation-provider"
+                }
+                .to_owned(),
+            ),
+            model_executor: Some(ModelExecutor::Antigravity),
+            ..SessionMeta::default()
+        },
+        git: None,
+    })];
+    rollout.extend(completed_user_turn_rollout(
+        context.clone(),
+        vec![RolloutItem::ResponseItem(
+            user_message("original work").into(),
+        )],
+    ));
+    rollout.push(RolloutItem::SessionMeta(SessionMetaLine {
+        meta: SessionMeta {
+            model_provider: Some("child-provider".to_owned()),
+            model_executor: Some(ModelExecutor::Codex),
+            ..SessionMeta::default()
+        },
+        git: None,
+    }));
+    let rollout = serde_json::from_value(serde_json::to_value(rollout).unwrap()).unwrap();
+    let history = if fork {
+        InitialHistory::Forked(rollout)
+    } else {
+        InitialHistory::Resumed(ResumedHistory {
+            history_revision: None,
+            conversation_id: session.thread_id,
+            history: Arc::new(rollout),
+            rollout_path: None,
+        })
+    };
+    session.record_initial_history(history).await;
+    assert_eq!(
+        session.previous_turn_settings().await,
+        Some(PreviousTurnSettings {
+            model: "parent-model".to_owned(),
+            model_runtime: Some(expected_runtime),
+            comp_hash: context.comp_hash,
+            cyber_access_program: context.cyber_access_program,
+            realtime_active: context.realtime_active,
+        })
+    );
+    assert_eq!(
+        strip_response_item_ids(&strip_metadata_from_items(&raw_history_items(
+            &session.clone_history().await,
+        ))),
+        strip_response_item_ids(&strip_metadata_from_items(&[user_message("original work")]))
+    );
+}
+
+#[test_case(None; "no source provider")]
+#[test_case(Some("source-provider"); "upstream executor defaults to codex")]
+#[tokio::test]
+async fn reconstruct_history_legacy_runtime_uses_only_preceding_session_provider(
+    source_provider: Option<&str>,
+) {
+    let (session, turn_context) = make_session_and_context().await;
+    let mut context = turn_context.to_turn_context_item();
+    context.model_runtime = None;
+    let mut rollout = vec![RolloutItem::SessionMeta(SessionMetaLine {
+        meta: SessionMeta {
+            model_provider: source_provider.map(str::to_owned),
+            model_executor: None,
+            ..SessionMeta::default()
+        },
+        git: None,
+    })];
+    rollout.extend(completed_user_turn_rollout(context, Vec::new()));
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout)
+        .await;
+    assert_eq!(
+        reconstructed.previous_turn_settings.unwrap().model_runtime,
+        source_provider.map(|provider| TurnModelRuntime {
+            model_provider: provider.to_owned(),
+            model_executor: codex_protocol::external_executor::ModelExecutor::Codex,
+            model_context_window: None,
+        })
+    );
+}
+
+#[test_case(false; "owned source settings")]
+#[test_case(true; "unowned legacy source settings")]
+#[tokio::test]
+async fn reconstruct_history_runtime_uses_preceding_owned_settings(legacy_owner: bool) {
+    let (session, turn_context) = make_session_and_context().await;
+    let owner = ThreadId::default();
+    let mut context = turn_context.to_turn_context_item();
+    context.model_runtime = None;
+    let mut settings = session.thread_settings_snapshot().await;
+    settings.model_provider_id = "selected-provider".to_owned();
+    settings.model_executor = Some(codex_protocol::external_executor::ModelExecutor::Antigravity);
+    let settings_item = |thread_id, provider: &str| {
+        let mut settings = settings.clone();
+        settings.model_provider_id = provider.to_owned();
+        RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(
+            codex_protocol::protocol::ThreadSettingsAppliedEvent {
+                thread_id,
+                thread_settings: settings,
+            },
+        ))
+    };
+    let mut rollout = vec![
+        RolloutItem::SessionMeta(SessionMetaLine {
+            meta: SessionMeta {
+                id: owner,
+                model_provider: Some("creation-provider".to_owned()),
+                ..SessionMeta::default()
+            },
+            git: None,
+        }),
+        settings_item((!legacy_owner).then_some(owner), "selected-provider"),
+        settings_item(Some(ThreadId::default()), "foreign-provider"),
+    ];
+    rollout.extend(completed_user_turn_rollout(context, Vec::new()));
+    rollout.push(settings_item(Some(owner), "future-provider"));
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout)
+        .await;
+    assert_eq!(
+        reconstructed.previous_turn_settings.unwrap().model_runtime,
+        Some(TurnModelRuntime {
+            model_provider: "selected-provider".to_owned(),
+            model_executor: codex_protocol::external_executor::ModelExecutor::Antigravity,
+            model_context_window: None,
+        })
+    );
+}
+
+#[tokio::test]
+async fn reconstruct_history_does_not_infer_legacy_source_from_canonical_fork_header() {
+    let (session, turn_context) = make_session_and_context().await;
+    let mut context = turn_context.to_turn_context_item();
+    context.model_runtime = None;
+    let mut rollout = vec![RolloutItem::SessionMeta(SessionMetaLine {
+        meta: SessionMeta {
+            forked_from_id: Some(ThreadId::default()),
+            model_provider: Some("child-provider".to_owned()),
+            ..SessionMeta::default()
+        },
+        git: None,
+    })];
+    rollout.extend(completed_user_turn_rollout(context, Vec::new()));
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout)
+        .await;
+    assert_eq!(
+        reconstructed.previous_turn_settings.unwrap().model_runtime,
+        None
+    );
+}
+
+#[test_case(false; "compaction preserves source runtime")]
+#[test_case(true; "explicit missing settings remain authoritative")]
+#[tokio::test]
+async fn reconstruct_history_compaction_preserves_model_runtime(clear_settings: bool) {
+    let (session, turn_context) = make_session_and_context().await;
+    let settings: PreviousTurnSettings = object!({
+        "model": "source-model",
+        "model_runtime": {
+            "model_provider": "source-provider",
+            "model_executor": "codex",
+            "model_context_window": 256000
+        }
+    });
+    let settings = (!clear_settings).then_some(settings);
+    let mut companion_context = turn_context.to_turn_context_item();
+    companion_context.model_runtime = Some(TurnModelRuntime {
+        model_provider: "target-provider".to_owned(),
+        model_executor: codex_protocol::external_executor::ModelExecutor::Codex,
+        model_context_window: Some(128_000),
+    });
+    let rollout = vec![
+        RolloutItem::Compacted(object!({
+            "message": "summary",
+            "replacement_history": [user_message("original work")],
+            "window_number": 1,
+            "resume_metadata": {"previous_turn_settings": settings}
+        })),
+        RolloutItem::TurnContext(companion_context),
+    ];
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout)
+        .await;
+    assert_eq!(reconstructed.previous_turn_settings, settings);
+}
+
+#[test_case(false; "source turn runtime")]
+#[test_case(true; "legacy source header")]
+#[tokio::test]
+async fn reconstruct_history_recovers_legacy_checkpoint_runtime_before_target_companion(
+    legacy: bool,
+) {
+    let (session, turn_context) = make_session_and_context().await;
+    let expected_runtime = TurnModelRuntime {
+        model_provider: "source-provider".to_owned(),
+        model_executor: codex_protocol::external_executor::ModelExecutor::Codex,
+        model_context_window: (!legacy).then_some(256_000),
+    };
+    let mut source = turn_context.to_turn_context_item();
+    source.model = "source-model".to_owned();
+    source.model_runtime = (!legacy).then(|| expected_runtime.clone());
+    let mut target = source.clone();
+    target.model = "target-model".to_owned();
+    target.model_runtime = Some(TurnModelRuntime {
+        model_provider: "target-provider".to_owned(),
+        model_executor: codex_protocol::external_executor::ModelExecutor::Codex,
+        model_context_window: Some(128_000),
+    });
+    let mut rollout = vec![RolloutItem::SessionMeta(SessionMetaLine {
+        meta: SessionMeta {
+            model_provider: Some("source-provider".to_owned()),
+            ..SessionMeta::default()
+        },
+        git: None,
+    })];
+    rollout.extend(completed_user_turn_rollout(source, Vec::new()));
+    rollout.extend([
+        RolloutItem::Compacted(object!({
+            "message": "summary",
+            "replacement_history": [user_message("original work")],
+            "window_number": 1,
+            "resume_metadata": {"previous_turn_settings": {"model": "source-model"}}
+        })),
+        RolloutItem::TurnContext(target),
+    ]);
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout)
+        .await;
+    assert_eq!(
+        reconstructed.previous_turn_settings.unwrap().model_runtime,
+        Some(expected_runtime)
+    );
+}
+
+#[tokio::test]
+async fn reconstruct_history_legacy_runtime_survives_compaction_replay_boundary() {
+    let (session, turn_context) = make_session_and_context().await;
+    let mut context = turn_context.to_turn_context_item();
+    context.model_runtime = None;
+    let mut rollout = vec![
+        RolloutItem::SessionMeta(SessionMetaLine {
+            meta: SessionMeta {
+                model_provider: Some("source-provider".to_owned()),
+                ..SessionMeta::default()
+            },
+            git: None,
+        }),
+        RolloutItem::Compacted(object!({
+            "message": "summary",
+            "replacement_history": [user_message("original work")],
+            "window_number": 1,
+            "resume_metadata": {}
+        })),
+    ];
+    rollout.extend(completed_user_turn_rollout(context.clone(), Vec::new()));
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout)
+        .await;
+    assert_eq!(
+        reconstructed.previous_turn_settings,
+        Some(PreviousTurnSettings {
+            model: context.model,
+            model_runtime: Some(TurnModelRuntime {
+                model_provider: "source-provider".to_owned(),
+                model_executor: codex_protocol::external_executor::ModelExecutor::Codex,
+                model_context_window: None,
+            }),
+            comp_hash: context.comp_hash,
+            cyber_access_program: context.cyber_access_program,
+            realtime_active: context.realtime_active,
+        })
+    );
+}
+
 #[tokio::test]
 async fn record_initial_history_reconstructs_typed_inter_agent_message() {
     let (session, _turn_context) = make_session_and_context().await;
@@ -424,6 +730,7 @@ async fn record_initial_history_restores_world_state_baseline(input: BaselineTur
         (
             Some(PreviousTurnSettings {
                 model: context_item.model.clone(),
+                model_runtime: context_item.model_runtime.clone(),
                 comp_hash: context_item.comp_hash.clone(),
                 cyber_access_program: None,
                 realtime_active: context_item.realtime_active,
@@ -461,6 +768,7 @@ async fn record_initial_history_resumed_bare_turn_context_does_not_hydrate_previ
         active_permission_profile: None,
         file_system_sandbox_policy: None,
         model: previous_model.to_string(),
+        model_runtime: None,
         comp_hash: None,
         collaboration_mode: Some(turn_context.collaboration_mode()),
         multi_agent_version: None,
@@ -507,6 +815,7 @@ async fn record_initial_history_resumed_hydrates_previous_turn_settings_from_lif
         active_permission_profile: None,
         file_system_sandbox_policy: None,
         model: previous_model.to_string(),
+        model_runtime: None,
         comp_hash: Some("comp-hash-a".to_string()),
         collaboration_mode: Some(turn_context.collaboration_mode()),
         multi_agent_version: None,
@@ -571,6 +880,7 @@ async fn record_initial_history_resumed_hydrates_previous_turn_settings_from_lif
         session.previous_turn_settings().await,
         Some(PreviousTurnSettings {
             model: previous_model.to_string(),
+            model_runtime: None,
             comp_hash: Some("comp-hash-a".to_string()),
             cyber_access_program: None,
             realtime_active: Some(turn_context.realtime_active),
@@ -710,6 +1020,7 @@ async fn reconstruct_history_rollback_keeps_history_and_metadata_in_sync_for_com
             .expect("serialize previous settings"),
         json!({
             "model": turn_context.model_info().slug,
+            "model_runtime": turn_context.to_turn_context_item().model_runtime,
             "comp_hash": null,
             "realtime_active": turn_context.realtime_active,
             "cyber_access_program": "daybreak_blue",
@@ -820,6 +1131,7 @@ async fn reconstruct_history_rollback_keeps_history_and_metadata_in_sync_for_inc
             .expect("serialize previous settings"),
         json!({
             "model": turn_context.model_info().slug,
+            "model_runtime": turn_context.to_turn_context_item().model_runtime,
             "comp_hash": null,
             "realtime_active": turn_context.realtime_active,
             "cyber_access_program": "daybreak_blue",
@@ -967,6 +1279,7 @@ async fn reconstruct_history_rollback_skips_non_user_turns_for_history_and_metad
         reconstructed.previous_turn_settings,
         Some(PreviousTurnSettings {
             model: turn_context.model_info().slug.clone(),
+            model_runtime: turn_context.to_turn_context_item().model_runtime,
             comp_hash: None,
             cyber_access_program: None,
             realtime_active: Some(turn_context.realtime_active),
@@ -1079,6 +1392,7 @@ async fn reconstruct_history_rollback_counts_inter_agent_assistant_turns() {
         reconstructed.previous_turn_settings,
         Some(PreviousTurnSettings {
             model: turn_context.model_info().slug.clone(),
+            model_runtime: turn_context.to_turn_context_item().model_runtime,
             comp_hash: None,
             cyber_access_program: None,
             realtime_active: Some(turn_context.realtime_active),
@@ -1336,6 +1650,7 @@ async fn record_initial_history_resumed_rollback_drops_incomplete_user_turn_comp
         session.previous_turn_settings().await,
         Some(PreviousTurnSettings {
             model: turn_context.model_info().slug.clone(),
+            model_runtime: turn_context.to_turn_context_item().model_runtime,
             comp_hash: None,
             cyber_access_program: None,
             realtime_active: Some(turn_context.realtime_active),
@@ -1627,6 +1942,7 @@ async fn bounded_replay_matches_full_replay_after_empty_turn_compactions(
                         turn_attribution: None,
                         previous_turn_settings: Some(PreviousTurnSettings {
                             model: format!("metadata-model-{window_number}"),
+                            model_runtime: None,
                             comp_hash: Some(format!("metadata-hash-{window_number}")),
                             cyber_access_program: None,
                             realtime_active: Some(false),
@@ -1875,6 +2191,7 @@ async fn completed_turn_suffix_after_compaction_overrides_resume_metadata(
     });
     let expected_settings = PreviousTurnSettings {
         model: newer_context.model.clone(),
+        model_runtime: newer_context.model_runtime.clone(),
         comp_hash: newer_context.comp_hash.clone(),
         cyber_access_program: None,
         realtime_active: newer_context.realtime_active,
@@ -2145,6 +2462,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
         active_permission_profile: None,
         file_system_sandbox_policy: None,
         model: previous_model.to_string(),
+        model_runtime: None,
         comp_hash: None,
         collaboration_mode: Some(turn_context.collaboration_mode()),
         multi_agent_version: None,
@@ -2222,6 +2540,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
         session.previous_turn_settings().await,
         Some(PreviousTurnSettings {
             model: previous_model.to_string(),
+            model_runtime: None,
             comp_hash: None,
             cyber_access_program: None,
             realtime_active: Some(turn_context.realtime_active),
@@ -2243,6 +2562,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
             active_permission_profile: None,
             file_system_sandbox_policy: None,
             model: previous_model.to_string(),
+            model_runtime: None,
             comp_hash: None,
             collaboration_mode: Some(turn_context.collaboration_mode()),
             multi_agent_version: None,
@@ -2273,6 +2593,7 @@ async fn record_initial_history_resumed_aborted_turn_without_id_clears_active_tu
         active_permission_profile: None,
         file_system_sandbox_policy: None,
         model: previous_model.to_string(),
+        model_runtime: None,
         comp_hash: None,
         collaboration_mode: Some(turn_context.collaboration_mode()),
         multi_agent_version: None,
@@ -2383,6 +2704,7 @@ async fn record_initial_history_resumed_aborted_turn_without_id_clears_active_tu
         session.previous_turn_settings().await,
         Some(PreviousTurnSettings {
             model: previous_model.to_string(),
+            model_runtime: None,
             comp_hash: None,
             cyber_access_program: None,
             realtime_active: Some(turn_context.realtime_active),
@@ -2416,6 +2738,7 @@ async fn record_initial_history_resumed_unmatched_abort_preserves_active_turn_fo
         active_permission_profile: None,
         file_system_sandbox_policy: None,
         model: current_model.to_string(),
+        model_runtime: None,
         comp_hash: None,
         collaboration_mode: Some(turn_context.collaboration_mode()),
         multi_agent_version: None,
@@ -2520,6 +2843,7 @@ async fn record_initial_history_resumed_unmatched_abort_preserves_active_turn_fo
         session.previous_turn_settings().await,
         Some(PreviousTurnSettings {
             model: current_model.to_string(),
+            model_runtime: None,
             comp_hash: None,
             cyber_access_program: None,
             realtime_active: Some(turn_context.realtime_active),
@@ -2551,6 +2875,7 @@ async fn record_initial_history_resumed_trailing_incomplete_turn_compaction_clea
         active_permission_profile: None,
         file_system_sandbox_policy: None,
         model: previous_model.to_string(),
+        model_runtime: None,
         comp_hash: None,
         collaboration_mode: Some(turn_context.collaboration_mode()),
         multi_agent_version: None,
@@ -2650,6 +2975,7 @@ async fn record_initial_history_resumed_trailing_incomplete_turn_compaction_clea
         session.previous_turn_settings().await,
         Some(PreviousTurnSettings {
             model: previous_model.to_string(),
+            model_runtime: None,
             comp_hash: None,
             cyber_access_program: None,
             realtime_active: Some(turn_context.realtime_active),
@@ -2705,6 +3031,7 @@ async fn record_initial_history_resumed_trailing_incomplete_turn_preserves_turn_
         session.previous_turn_settings().await,
         Some(PreviousTurnSettings {
             model: turn_context.model_info().slug.clone(),
+            model_runtime: turn_context.to_turn_context_item().model_runtime,
             comp_hash: None,
             cyber_access_program: None,
             realtime_active: Some(turn_context.realtime_active),
@@ -2736,6 +3063,7 @@ async fn record_initial_history_resumed_replaced_incomplete_compacted_turn_clear
         active_permission_profile: None,
         file_system_sandbox_policy: None,
         model: previous_model.to_string(),
+        model_runtime: None,
         comp_hash: None,
         collaboration_mode: Some(turn_context.collaboration_mode()),
         multi_agent_version: None,
@@ -2849,6 +3177,7 @@ async fn record_initial_history_resumed_replaced_incomplete_compacted_turn_clear
         session.previous_turn_settings().await,
         Some(PreviousTurnSettings {
             model: previous_model.to_string(),
+            model_runtime: None,
             comp_hash: None,
             cyber_access_program: None,
             realtime_active: Some(turn_context.realtime_active),

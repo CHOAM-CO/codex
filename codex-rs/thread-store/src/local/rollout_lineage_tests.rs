@@ -83,20 +83,29 @@ async fn resolves_nested_lineage_with_empty_intermediate_segments() {
         vec![
             RolloutLineageSegment {
                 rollout_id: root,
+                thread_id: root,
+                accepts_unowned_settings: true,
                 rollout_path: root_path.clone(),
                 start_ordinal: 1,
+                model_runtime: None,
                 end: Some(root_end),
             },
             RolloutLineageSegment {
                 rollout_id: middle,
+                thread_id: middle,
+                accepts_unowned_settings: false,
                 rollout_path: middle_path.clone(),
                 start_ordinal: 5,
+                model_runtime: None,
                 end: Some(middle_end),
             },
             RolloutLineageSegment {
                 rollout_id: child,
+                thread_id: child,
+                accepts_unowned_settings: false,
                 rollout_path: child_path,
                 start_ordinal: 6,
+                model_runtime: None,
                 end: None,
             },
         ]
@@ -167,14 +176,20 @@ async fn resolves_lineage_at_explicit_history_position() {
         vec![
             RolloutLineageSegment {
                 rollout_id: root,
+                thread_id: root,
+                accepts_unowned_settings: true,
                 rollout_path: root_path.clone(),
                 start_ordinal: 1,
+                model_runtime: None,
                 end: Some(root_end),
             },
             RolloutLineageSegment {
                 rollout_id: child,
+                thread_id: child,
+                accepts_unowned_settings: false,
                 rollout_path: child_path.clone(),
                 start_ordinal: 5,
+                model_runtime: None,
                 end: Some(end),
             },
         ]

@@ -401,6 +401,7 @@ pub(crate) async fn run_turn(
         .await;
     sess.set_previous_turn_settings(Some(PreviousTurnSettings {
         model: turn_context.model_info().slug.clone(),
+        model_runtime: Some(turn_context.model_runtime()),
         cyber_access_program: turn_context.cyber_access_program,
         comp_hash: turn_context.model_info().comp_hash.clone(),
         realtime_active: Some(turn_context.realtime_active),
@@ -1375,11 +1376,27 @@ async fn run_pre_sampling_compact(
     client_session: &mut ModelClientSession,
     cancellation_token: &CancellationToken,
 ) -> CodexResult<()> {
-    maybe_run_previous_model_inline_compact(sess, turn_context, client_session, cancellation_token)
-        .await?;
+    let compacted_previous = maybe_run_previous_model_inline_compact(
+        sess,
+        turn_context,
+        client_session,
+        cancellation_token,
+    )
+    .await?;
     let token_status =
         super::context_window::context_window_token_status(sess.as_ref(), turn_context.as_ref())
             .await;
+    if compacted_previous {
+        // A model transition runs one compaction operation. Do not compact again with the
+        // smaller model, or sample a response against a history that still cannot fit there.
+        if token_status.token_limit_reached {
+            return Err(CodexErr::InvalidRequest(format!(
+                "Previous-model compaction completed, but the resulting context still exceeds the budget for {}. The new model has not been called.",
+                turn_context.model_info().slug
+            )));
+        }
+        return Ok(());
+    }
     let candidate = super::async_compaction::take_ready(sess, turn_context).await;
     // Compact if the configured auto-compaction budget or usable context window is exhausted.
     if token_status.token_limit_reached || candidate.is_some() {
@@ -1412,29 +1429,56 @@ fn comp_hash_changed(previous: Option<&str>, current: Option<&str>) -> bool {
 /// Runs pre-sampling compaction against the previous model when its compaction compatibility
 /// hash changed or when switching to a smaller context-window model.
 ///
-/// Returns `Err(_)` only when compaction was attempted and failed.
+/// Returns whether model-downshift compaction was installed. Failures stop the destination request.
 async fn maybe_run_previous_model_inline_compact(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
     client_session: &mut ModelClientSession,
     cancellation_token: &CancellationToken,
-) -> CodexResult<()> {
+) -> CodexResult<bool> {
     let Some(previous_turn_settings) = sess.previous_turn_settings().await else {
-        return Ok(());
+        return Ok(false);
     };
     let should_compact_for_comp_hash_change = comp_hash_changed(
         previous_turn_settings.comp_hash.as_deref(),
         turn_context.model_info().comp_hash.as_deref(),
     );
     let previous_model = previous_turn_settings.model;
-    if !should_compact_for_comp_hash_change && previous_model == turn_context.model_info().slug {
-        return Ok(());
+    let runtime_changed = previous_turn_settings
+        .model_runtime
+        .as_ref()
+        .is_some_and(|runtime| {
+            runtime.model_provider != turn_context.config.model_provider_id
+                || runtime.model_executor != turn_context.config.model_executor
+        });
+    if !should_compact_for_comp_hash_change
+        && previous_model == turn_context.model_info().slug
+        && !runtime_changed
+    {
+        return Ok(false);
+    }
+    let status = super::context_window::context_window_token_status(sess, turn_context).await;
+    if !should_compact_for_comp_hash_change && !status.token_limit_reached {
+        return Ok(false);
+    }
+    let runtime = previous_turn_settings.model_runtime.as_ref().ok_or_else(|| {
+        CodexErr::InvalidRequest(format!(
+            "Cannot compact with previous model {previous_model}: its provider is absent from the saved session metadata"
+        ))
+    })?;
+    if runtime.model_executor != codex_protocol::external_executor::ModelExecutor::Codex {
+        return Err(CodexErr::UnsupportedOperation(
+            "The previous model uses an external executor, which does not support Codex context compaction. No request was sent to the new model.".to_string(),
+        ));
     }
     let mut previous_model_turn_context = turn_context
-        .with_model(previous_model.clone(), &sess.services.models_manager)
-        .await;
-    // `with_model` preserves the current turn's access program. Restore the previous
-    // turn's program so compaction uses the same model/cyber_access_program pair as that turn.
+        .with_model_runtime(
+            previous_model.clone(),
+            runtime,
+            &sess.services.models_manager,
+        )
+        .await?;
+    // Restore the previous turn's program so compaction uses the same model/program pair.
     // Combining the previous model with the current turn's program can produce a pair
     // that the server rejects.
     previous_model_turn_context.cyber_access_program = cyber_access_program::for_provider(
@@ -1443,48 +1487,31 @@ async fn maybe_run_previous_model_inline_compact(
     );
     let previous_model_turn_context = Arc::new(previous_model_turn_context);
 
-    let reason = if should_compact_for_comp_hash_change {
+    let smaller_window = previous_model_turn_context
+        .model_context_window()
+        .zip(turn_context.model_context_window())
+        .is_some_and(|(old, new)| old > new);
+    let previous_model_limit_reached =
+        match turn_context.config.model_auto_compact_token_limit_scope {
+            AutoCompactTokenLimitScope::Total => status.token_limit_reached,
+            AutoCompactTokenLimitScope::BodyAfterPrefix => status.full_context_window_limit_reached,
+        };
+    let reason = if smaller_window && previous_model_limit_reached {
+        CompactionReason::ModelDownshift
+    } else if should_compact_for_comp_hash_change {
         CompactionReason::CompHashChanged
     } else {
-        let Some(old_context_window) = previous_model_turn_context.model_context_window() else {
-            return Ok(());
-        };
-        let Some(new_context_window) = turn_context.model_context_window() else {
-            return Ok(());
-        };
-        let active_context_tokens = sess.get_total_token_usage().await;
-        let previous_model_limit_reached =
-            match turn_context.config.model_auto_compact_token_limit_scope {
-                AutoCompactTokenLimitScope::Total => {
-                    let new_auto_compact_limit = turn_context
-                        .model_info()
-                        .auto_compact_token_limit()
-                        .unwrap_or(i64::MAX);
-                    active_context_tokens > new_auto_compact_limit
-                        || active_context_tokens >= new_context_window
-                }
-                AutoCompactTokenLimitScope::BodyAfterPrefix => {
-                    active_context_tokens >= new_context_window
-                }
-            };
-        if !previous_model_limit_reached
-            || previous_model_turn_context.model_info().slug == turn_context.model_info().slug
-            || old_context_window <= new_context_window
-        {
-            return Ok(());
-        }
-        CompactionReason::ModelDownshift
+        return Ok(false);
     };
 
     let step_context = sess
         .capture_step_context(previous_model_turn_context, cancellation_token)
         .await?;
     // The previous model summarizes the old window; the current model owns its replacement.
-    // Reuse the replacement step if the compaction request needs to fall back to that model.
     let replacement_step_context = sess
         .capture_speculative_step_context(Arc::clone(turn_context), cancellation_token)
         .await?;
-    run_auto_compact(
+    let installed = run_auto_compact(
         sess,
         step_context,
         replacement_step_context,
@@ -1494,7 +1521,7 @@ async fn maybe_run_previous_model_inline_compact(
         /*candidate*/ None,
     )
     .await?;
-    Ok(())
+    Ok(installed && matches!(reason, CompactionReason::ModelDownshift))
 }
 
 /// The replacement context may use a different model than the compactor.
@@ -1531,7 +1558,9 @@ async fn run_auto_compact(
         conversation.id = %sess.thread_id,
         turn.id = %turn_context.sub_id,
     );
-    if turn_context.config.features.enabled(Feature::TokenBudget) {
+    if turn_context.config.features.enabled(Feature::TokenBudget)
+        && !matches!(reason, CompactionReason::ModelDownshift)
+    {
         // Compaction is the reset request, so force a new context window
         // instead of consuming a pending `new_context` tool request.
         crate::compact_token_budget::run_inline_auto_compact_task(
@@ -1543,7 +1572,21 @@ async fn run_auto_compact(
         return Ok(true);
     }
 
-    match turn_context.provider.capabilities().remote_compaction {
+    // Encrypted checkpoints belong to the source provider. Across providers, use Codex's
+    // existing readable-summary compaction; encrypted-content support alone is not compatibility.
+    let remote_compaction = if turn_context.config.model_provider_id
+        == replacement_step_context.turn.config.model_provider_id
+        && replacement_step_context
+            .turn
+            .provider
+            .capabilities()
+            .encrypted_content
+    {
+        turn_context.provider.capabilities().remote_compaction
+    } else {
+        RemoteCompactionSupport::Unsupported
+    };
+    match remote_compaction {
         RemoteCompactionSupport::V2 => {
             let has_candidate = candidate.is_some();
             if !has_candidate {
@@ -1570,6 +1613,23 @@ async fn run_auto_compact(
             } else {
                 crate::compact_remote_v2::CompactionFallback::Foreground
             };
+            let mut previous_provider_session;
+            let client_session =
+                if sess.services.model_client.provider_info() != turn_context.provider.info() {
+                    previous_provider_session = sess
+                        .services
+                        .model_client
+                        .for_provider(
+                            &turn_context.provider,
+                            cyber_access_program::ApiKeyCyberAccessPrograms::from_config(
+                                &turn_context.config,
+                            ),
+                        )
+                        .new_session();
+                    &mut previous_provider_session
+                } else {
+                    client_session
+                };
             let installed = run_inline_remote_auto_compact_task_v2(
                 Arc::clone(sess),
                 step_context,

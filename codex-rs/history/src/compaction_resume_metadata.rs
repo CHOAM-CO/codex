@@ -2,6 +2,7 @@
 
 use crate::RolloutItem;
 use codex_protocol::protocol::MultiAgentVersion;
+use codex_protocol::protocol::TurnModelRuntime;
 use codex_protocol::turn_input::CyberAccessProgram;
 use codex_protocol::turn_input::TurnAttribution;
 use schemars::JsonSchema;
@@ -28,6 +29,9 @@ pub struct CompactionResumeMetadata {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct PreviousTurnSettings {
     pub model: String,
+    /// Source runtime; absence must not inherit the resumed turn's provider or executor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_runtime: Option<TurnModelRuntime>,
     /// Historical program for this model; absence must not inherit the next turn's selection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cyber_access_program: Option<CyberAccessProgram>,
@@ -53,5 +57,44 @@ pub fn resume_multi_agent_version(item: &RolloutItem) -> Option<MultiAgentVersio
         | RolloutItem::SecurityRiskScore(_)
         | RolloutItem::RealtimeItem(_)
         | RolloutItem::EventMsg(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_protocol::external_executor::ModelExecutor;
+    use serde_json::json;
+
+    #[test]
+    fn previous_turn_settings_preserve_optional_model_runtime() {
+        let legacy = json!({"model": "source-model"});
+        let mut settings: PreviousTurnSettings = serde_json::from_value(legacy).unwrap();
+        assert_eq!(settings.model_runtime, None);
+        assert!(
+            serde_json::to_value(&settings)
+                .unwrap()
+                .get("model_runtime")
+                .is_none()
+        );
+
+        settings.model_runtime = Some(TurnModelRuntime {
+            model_provider: "source-provider".to_owned(),
+            model_executor: ModelExecutor::Codex,
+            model_context_window: Some(256_000),
+        });
+        let persisted = serde_json::to_value(&settings).unwrap();
+        assert_eq!(
+            persisted["model_runtime"],
+            json!({
+                "model_provider": "source-provider",
+                "model_executor": "codex",
+                "model_context_window": 256_000
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<PreviousTurnSettings>(persisted).unwrap(),
+            settings
+        );
     }
 }

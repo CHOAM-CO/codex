@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_protocol::protocol::TurnModelRuntime;
 
 use super::LocalThreadStore;
 use super::thread_rollout_resolver;
@@ -15,9 +16,13 @@ use crate::ThreadStoreResult;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct RolloutLineageSegment {
     pub(super) rollout_id: ThreadId,
+    pub(super) thread_id: ThreadId,
+    pub(super) accepts_unowned_settings: bool,
     pub(super) rollout_path: PathBuf,
     pub(super) start_ordinal: u64,
     pub(super) end: Option<HistoryPosition>,
+    /// Runtime at this source segment's creation, before canonical child metadata replaces it.
+    pub(super) model_runtime: Option<TurnModelRuntime>,
 }
 
 /// Ordered rollout ranges contributing to one forked history.
@@ -183,11 +188,27 @@ impl LocalThreadStore {
                 })?,
                 None => 1,
             };
+            let accepts_unowned_settings = meta.meta.forked_from_id.is_none()
+                && meta.meta.history_base.is_none()
+                && meta.meta.subagent_history_start_ordinal.is_none();
             segments.push(RolloutLineageSegment {
                 rollout_id,
+                thread_id: meta.meta.id,
+                accepts_unowned_settings,
                 rollout_path,
                 start_ordinal,
                 end,
+                // Copied forks can contain legacy parent turns after a child header even
+                // without a history_base. Only owned settings or explicit turn runtime can
+                // establish their source; never stamp the child's provider onto them.
+                model_runtime: accepts_unowned_settings
+                    .then_some(meta.meta.model_provider.as_ref())
+                    .flatten()
+                    .map(|provider| TurnModelRuntime {
+                        model_provider: provider.clone(),
+                        model_executor: meta.meta.model_executor.unwrap_or_default(),
+                        model_context_window: None,
+                    }),
             });
 
             let Some(base) = meta.meta.history_base else {

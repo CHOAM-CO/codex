@@ -144,6 +144,49 @@ fn test_model_provider() -> SharedModelProvider {
     test_model_client(SessionSource::Cli).state.provider.clone()
 }
 
+#[test]
+fn previous_provider_client_uses_source_route_and_separate_connection_state() {
+    let mut destination = test_model_client(SessionSource::Cli);
+    destination.prompt_cache_key_override = Some("shared-thread-cache".to_string());
+    destination.restored_history = true;
+    destination
+        .state
+        .disable_websockets
+        .store(true, Ordering::Relaxed);
+    let source = create_model_provider(
+        create_oss_provider_with_base_url("https://source.example/v1", WireApi::Responses),
+        None,
+    );
+    let client = destination.for_provider(
+        &source,
+        crate::cyber_access_program::ApiKeyCyberAccessPrograms::UnsupportedProvider,
+    );
+    assert_eq!(client.provider_info(), source.info());
+    assert!(!Arc::ptr_eq(&client.state, &destination.state));
+    assert_eq!(client.state.thread_id, destination.state.thread_id);
+    assert_eq!(
+        client.prompt_cache_key_override,
+        destination.prompt_cache_key_override
+    );
+    assert!(client.restored_history);
+    assert!(!client.state.disable_websockets.load(Ordering::Relaxed));
+    let session = client.new_session();
+    assert_eq!(
+        session.client.provider_info().base_url.as_deref(),
+        Some("https://source.example/v1")
+    );
+    assert_eq!(
+        destination.provider_info().base_url.as_deref(),
+        Some("https://example.com/v1")
+    );
+
+    let same_provider = destination.for_provider(
+        &destination.state.provider,
+        crate::cyber_access_program::ApiKeyCyberAccessPrograms::UnsupportedProvider,
+    );
+    assert!(Arc::ptr_eq(&same_provider.state, &destination.state));
+}
+
 #[tokio::test]
 async fn workspace_routed_http_rejects_redirects_without_a_routing_header() {
     use codex_client::HttpTransport;

@@ -1941,6 +1941,7 @@ async fn resume_candidate_matches_cwd_reads_latest_turn_context() -> std::io::Re
             active_permission_profile: None,
             file_system_sandbox_policy: None,
             model: "test-model".to_string(),
+            model_runtime: None,
             comp_hash: None,
             collaboration_mode: None,
             multi_agent_version: None,

@@ -100,13 +100,20 @@ pub(super) async fn run_remote_compact_v2_attempt(
             } else {
                 sess.get_prompt_base_instructions().await
             };
-            let (rewritten_outputs, estimated_deleted_tokens) =
+            let (rewritten_outputs, estimated_deleted_tokens) = if matches!(
+                compaction_metadata.reason(),
+                CompactionReason::ModelDownshift
+            ) {
+                // Preserve all source input for the one previous-model transition attempt.
+                (0, 0)
+            } else {
                 trim_function_call_history_to_fit_context_window(
                     &mut history,
                     turn_context,
                     turn_context.model_context_window(),
                     &base_instructions,
-                );
+                )
+            };
             if rewritten_outputs > 0 {
                 info!(
                     turn_id = %turn_context.sub_id,
@@ -137,7 +144,17 @@ pub(super) async fn run_remote_compact_v2_attempt(
                 .executed_tool_calls
                 .attach_to_compaction_prompt(&mut input);
             let client_session = client_session.unwrap_or_else(|| {
-                owned_client_session.insert(sess.services.model_client.new_session())
+                owned_client_session.insert(
+                    sess.services
+                        .model_client
+                        .for_provider(
+                            &turn_context.provider,
+                            crate::cyber_access_program::ApiKeyCyberAccessPrograms::from_config(
+                                &turn_context.config,
+                            ),
+                        )
+                        .new_session(),
+                )
             });
             (
                 model_info,

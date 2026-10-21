@@ -75,6 +75,7 @@ fn turn_context_item(
         active_permission_profile,
         file_system_sandbox_policy: None,
         model: "gpt-5".to_string(),
+        model_runtime: None,
         comp_hash: None,
         collaboration_mode: None,
         multi_agent_version: None,
