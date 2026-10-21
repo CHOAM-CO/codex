@@ -13168,12 +13168,17 @@ experimental_realtime_start_instructions = "start instructions from config"
 #[tokio::test]
 async fn experimental_realtime_ws_base_url_loads_from_config_toml() -> std::io::Result<()> {
     let cfg: ConfigToml = toml::from_str(
-        r#"experimental_realtime_ws_base_url = "http://127.0.0.1:8011"
+        r#"experimental_realtime_model_provider = "voice-provider"
+experimental_realtime_ws_base_url = "http://127.0.0.1:8011"
 experimental_realtime_webrtc_call_base_url = "http://127.0.0.1:8082/v1"
 "#,
     )
     .expect("TOML deserialization should succeed");
 
+    assert_eq!(
+        cfg.experimental_realtime_model_provider.as_deref(),
+        Some("voice-provider")
+    );
     assert_eq!(
         cfg.experimental_realtime_ws_base_url.as_deref(),
         Some("http://127.0.0.1:8011")
@@ -13190,6 +13195,10 @@ experimental_realtime_webrtc_call_base_url = "http://127.0.0.1:8082/v1"
     )
     .await?;
 
+    assert_eq!(
+        config.experimental_realtime_model_provider.as_deref(),
+        Some("voice-provider")
+    );
     assert_eq!(
         config.experimental_realtime_ws_base_url.as_deref(),
         Some("http://127.0.0.1:8011")

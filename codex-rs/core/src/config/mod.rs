@@ -1075,6 +1075,8 @@ pub struct Config {
     /// Machine-local realtime audio device preferences used by realtime voice.
     pub realtime_audio: RealtimeAudioConfig,
 
+    /// Optional provider for realtime transport/authentication, independent of the thread model.
+    pub experimental_realtime_model_provider: Option<String>,
     /// Experimental / do not use. Overrides only the realtime conversation
     /// websocket transport base URL (the `Op::RealtimeConversation`
     /// `/v1/realtime`
@@ -4585,6 +4587,7 @@ impl Config {
                     microphone_channel: audio.microphone_channel,
                     speaker: audio.speaker,
                 }),
+            experimental_realtime_model_provider: cfg.experimental_realtime_model_provider,
             experimental_realtime_ws_base_url: cfg.experimental_realtime_ws_base_url,
             experimental_realtime_webrtc_call_base_url: cfg
                 .experimental_realtime_webrtc_call_base_url,

@@ -622,8 +622,8 @@ impl ModelClient {
         self
     }
 
-    /// Use another configured provider for a previous-model compaction without carrying the
-    /// destination provider's connection, authentication recovery, or tool cache across routes.
+    /// Use another configured provider without carrying its connection,
+    /// authentication recovery, or tool cache across routes.
     pub(crate) fn for_provider(
         &self,
         provider: &SharedModelProvider,
@@ -661,6 +661,11 @@ impl ModelClient {
         client.executed_tool_calls = self.executed_tool_calls.clone();
         client.api_key_cyber_access_programs = api_key_cyber_access_programs;
         client
+    }
+
+    /// Route voice transport separately while preserving this thread's request context.
+    pub(crate) fn for_realtime_provider(&self, provider: &SharedModelProvider) -> Self {
+        self.for_provider(provider, self.api_key_cyber_access_programs)
     }
 
     pub(crate) fn reasoning_effort_override_enabled(&self, model_info: &ModelInfo) -> bool {

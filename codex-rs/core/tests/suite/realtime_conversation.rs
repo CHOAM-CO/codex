@@ -16,6 +16,7 @@ use codex_history::ResponseItemEnvelope;
 use codex_history::RolloutItem;
 use codex_login::CodexAuth;
 use codex_login::OPENAI_API_KEY_ENV_VAR;
+use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::ThreadId;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::models::ContentItem;
@@ -997,6 +998,7 @@ async fn conversation_webrtc_start_posts_generated_session() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
+    let main_provider_server = start_mock_server().await;
     let sideband_accept_delay = Duration::from_millis(1000);
     let capture = RealtimeCallRequestCapture::new();
     Mock::given(method("POST"))
@@ -1024,14 +1026,24 @@ async fn conversation_webrtc_start_posts_generated_session() -> Result<()> {
     .await;
 
     let realtime_ws_base_url = realtime_server.uri().to_string();
-    let mut builder = test_codex().with_config(move |config| {
-        config.experimental_realtime_ws_backend_prompt = Some("backend prompt".to_string());
-        config.experimental_realtime_ws_model = Some("realtime-test-model".to_string());
-        config.experimental_realtime_ws_startup_context = Some("startup context".to_string());
-        config.experimental_realtime_ws_base_url = Some(realtime_ws_base_url);
-        config.realtime.version = RealtimeWsVersion::V2;
+    let mut builder = test_codex().with_config({
+        let voice_provider_base_url = format!("{}/v1", server.uri());
+        move |config| {
+            config.experimental_realtime_ws_backend_prompt = Some("backend prompt".to_string());
+            config.experimental_realtime_ws_model = Some("realtime-test-model".to_string());
+            config.experimental_realtime_ws_startup_context = Some("startup context".to_string());
+            config.experimental_realtime_ws_base_url = Some(realtime_ws_base_url);
+            let mut voice_provider =
+                ModelProviderInfo::create_openai_provider(Some(voice_provider_base_url));
+            voice_provider.supports_websockets = false;
+            config
+                .model_providers
+                .insert("voice-test-provider".to_string(), voice_provider);
+            config.experimental_realtime_model_provider = Some("voice-test-provider".to_string());
+            config.realtime.version = RealtimeWsVersion::V2;
+        }
     });
-    let test = builder.build(&server).await?;
+    let test = builder.build(&main_provider_server).await?;
 
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
@@ -2743,6 +2755,140 @@ async fn conversation_uses_experimental_realtime_ws_base_url_override() -> Resul
 
     startup_server.shutdown().await;
     realtime_server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conversation_uses_configured_realtime_provider_without_rerouting_thread_provider()
+-> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let startup_server = start_websocket_server(vec![vec![]]).await;
+    let realtime_server = start_websocket_server(vec![vec![vec![json!({
+        "type": "session.updated",
+        "session": { "id": "sess_provider_override", "instructions": "backend prompt" }
+    })]]])
+    .await;
+
+    let mut builder = test_codex().with_config({
+        let main_provider_base_url = format!("{}/v1", startup_server.uri());
+        let realtime_provider_base_url = format!("{}/v1", realtime_server.uri());
+        move |config| {
+            config.model_provider.base_url = Some(main_provider_base_url);
+            let mut realtime_provider =
+                ModelProviderInfo::create_openai_provider(Some(realtime_provider_base_url));
+            realtime_provider.supports_websockets = false;
+            config
+                .model_providers
+                .insert("voice-test-provider".to_string(), realtime_provider);
+            config.experimental_realtime_model_provider = Some("voice-test-provider".to_string());
+            config.realtime.version = RealtimeWsVersion::V1;
+        }
+    });
+    let test = builder.build_with_websocket_server(&startup_server).await?;
+    assert!(
+        startup_server
+            .wait_for_handshakes(/*expected*/ 1, Duration::from_secs(2))
+            .await
+    );
+
+    test.codex
+        .submit(Op::RealtimeConversationStart(ConversationStartParams {
+            client_managed_handoffs: false,
+            delegation_ack_filler: None,
+            flush_transcript_tail_on_session_end: false,
+            codex_responses_as_items: false,
+            codex_response_item_prefix: None,
+            codex_response_handoff_mode:
+                codex_protocol::protocol::CodexResponseHandoffMode::Thinking,
+            backend_reasoning_status: false,
+            codex_response_handoff_channel_prefixes: None,
+            model: None,
+            output_modality: RealtimeOutputModality::Audio,
+            include_startup_context: true,
+            initial_items: Vec::new(),
+            realtime_start_instructions: None,
+            realtime_end_instructions: None,
+            prompt: Some(Some("backend prompt".to_string())),
+            realtime_session_id: None,
+            transport: None,
+            version: None,
+            voice: None,
+        }))
+        .await?;
+
+    let session_updated = wait_for_event_match(&test.codex, |msg| match msg {
+        EventMsg::RealtimeConversationRealtime(RealtimeConversationRealtimeEvent {
+            payload:
+                RealtimeEvent::SessionUpdated {
+                    realtime_session_id: session_id,
+                    ..
+                },
+        }) => Some(session_id.clone()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(session_updated, "sess_provider_override");
+    assert_eq!(startup_server.connections().len(), 1);
+    assert_eq!(realtime_server.connections().len(), 1);
+
+    test.codex.submit(Op::RealtimeConversationClose).await?;
+    let closed = wait_for_event_match(&test.codex, |msg| match msg {
+        EventMsg::RealtimeConversationClosed(closed) => Some(closed.clone()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(closed.reason.as_deref(), Some("requested"));
+
+    startup_server.shutdown().await;
+    realtime_server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conversation_rejects_unknown_realtime_provider_before_connecting() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let startup_server = start_websocket_server(vec![vec![]]).await;
+    let mut builder = test_codex().with_config(|config| {
+        config.experimental_realtime_model_provider = Some("missing-voice-provider".to_string());
+    });
+    let test = builder.build_with_websocket_server(&startup_server).await?;
+
+    test.codex
+        .submit(Op::RealtimeConversationStart(ConversationStartParams {
+            client_managed_handoffs: false,
+            delegation_ack_filler: None,
+            flush_transcript_tail_on_session_end: false,
+            codex_responses_as_items: false,
+            codex_response_item_prefix: None,
+            codex_response_handoff_mode:
+                codex_protocol::protocol::CodexResponseHandoffMode::Thinking,
+            backend_reasoning_status: false,
+            codex_response_handoff_channel_prefixes: None,
+            model: None,
+            output_modality: RealtimeOutputModality::Audio,
+            include_startup_context: true,
+            initial_items: Vec::new(),
+            realtime_start_instructions: None,
+            realtime_end_instructions: None,
+            prompt: Some(Some("backend prompt".to_string())),
+            realtime_session_id: None,
+            transport: None,
+            version: None,
+            voice: None,
+        }))
+        .await?;
+
+    let error = wait_for_event_match(&test.codex, |msg| match msg {
+        EventMsg::Error(error) => Some(error.message.clone()),
+        _ => None,
+    })
+    .await;
+    assert!(error.contains("Realtime provider missing-voice-provider is not configured"));
+    assert!(startup_server.connections().len() <= 1);
+
+    startup_server.shutdown().await;
     Ok(())
 }
 

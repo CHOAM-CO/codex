@@ -437,6 +437,10 @@ pub struct ConfigToml {
     #[serde(default)]
     pub audio: Option<RealtimeAudioToml>,
 
+    /// Selects a configured provider for realtime transport and authentication only.
+    /// Unset values keep the current thread's provider; model execution and history are unchanged.
+    #[serde(default)]
+    pub experimental_realtime_model_provider: Option<String>,
     /// Experimental / do not use. Overrides only the realtime conversation
     /// websocket transport base URL (the `Op::RealtimeConversation`
     /// `/v1/realtime`

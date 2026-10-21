@@ -7060,6 +7060,11 @@
     "experimental_compact_prompt_file": {
       "$ref": "#/definitions/AbsolutePathBuf"
     },
+    "experimental_realtime_model_provider": {
+      "default": null,
+      "description": "Selects a configured provider for realtime transport and authentication only. Unset values keep the current thread's provider; model execution and history are unchanged.",
+      "type": "string"
+    },
     "experimental_realtime_start_instructions": {
       "description": "Experimental / do not use. Replaces the built-in realtime start instructions inserted into developer messages when realtime becomes active.",
       "type": "string"
