@@ -388,6 +388,204 @@ async fn reconstruct_history_preserves_source_runtime_before_child_metadata(
     );
 }
 
+#[test_case(CodexErrorInfo::ContextWindowExceeded, "none", false; "overflow before output retains source")]
+#[test_case(CodexErrorInfo::ContextWindowExceeded, "none", true; "overflow retains checkpoint source")]
+#[test_case(CodexErrorInfo::ContextWindowExceeded, "assistant", false; "assistant output establishes target")]
+#[test_case(CodexErrorInfo::ContextWindowExceeded, "tool", false; "tool call establishes target")]
+#[test_case(CodexErrorInfo::ContextWindowExceeded, "first_token", false; "partial streamed output establishes target")]
+#[test_case(CodexErrorInfo::BadRequest, "none", false; "failed request before output retains source")]
+#[test_case(CodexErrorInfo::Unauthorized, "none", false; "source compaction auth failure retains source")]
+#[test_case(CodexErrorInfo::ResponseStreamDisconnected { http_status_code: None }, "none", true; "source compaction stream failure retains checkpoint source")]
+#[tokio::test]
+async fn reconstruct_history_rejected_context_keeps_previous_source(
+    error: CodexErrorInfo,
+    output: &str,
+    checkpoint: bool,
+) {
+    let (session, turn_context) = make_session_and_context().await;
+    let mut source = turn_context.to_turn_context_item();
+    source.turn_id = Some("source-turn".to_owned());
+    source.model = "source-model".to_owned();
+    source.model_runtime = Some(TurnModelRuntime {
+        model_provider: "source-provider".to_owned(),
+        model_executor: codex_protocol::external_executor::ModelExecutor::Codex,
+        model_context_window: Some(256_000),
+    });
+    let source_settings = PreviousTurnSettings {
+        model: source.model.clone(),
+        model_runtime: source.model_runtime.clone(),
+        comp_hash: source.comp_hash.clone(),
+        cyber_access_program: source.cyber_access_program,
+        realtime_active: source.realtime_active,
+    };
+    let mut target = source.clone();
+    target.turn_id = Some("target-turn".to_owned());
+    target.model = "target-model".to_owned();
+    target.model_runtime = Some(TurnModelRuntime {
+        model_provider: "target-provider".to_owned(),
+        model_executor: codex_protocol::external_executor::ModelExecutor::Codex,
+        model_context_window: Some(128_000),
+    });
+    let mut expected_history = vec![user_message("preserved source")];
+    let mut rollout = if checkpoint {
+        vec![RolloutItem::Compacted(object!({
+            "message": "summary",
+            "replacement_history": expected_history,
+            "window_number": 1,
+            "resume_metadata": {"previous_turn_settings": source_settings}
+        }))]
+    } else {
+        completed_user_turn_rollout(
+            source,
+            vec![RolloutItem::ResponseItem(
+                expected_history[0].clone().into(),
+            )],
+        )
+    };
+    let input = user_message("preserved new request");
+    expected_history.push(input.clone());
+    let mut target_items = vec![RolloutItem::ResponseItem(input.into())];
+    let generated = match output {
+        "assistant" => Some(assistant_message("partial response")),
+        "tool" => Some(object!({
+            "type": "function_call", "name": "inspect", "call_id": "call-one", "arguments": "{}"
+        })),
+        _ => None,
+    };
+    if let Some(generated) = generated {
+        expected_history.push(generated.clone());
+        target_items.push(RolloutItem::ResponseItem(generated.into()));
+    }
+    let mut target_rollout = completed_user_turn_rollout(target.clone(), target_items);
+    let RolloutItem::EventMsg(EventMsg::TurnComplete(completion)) =
+        target_rollout.last_mut().unwrap()
+    else {
+        unreachable!();
+    };
+    completion.error = Some(codex_protocol::protocol::ErrorEvent {
+        message: "request failed".to_owned(),
+        codex_error_info: Some(error.clone()),
+        misalignment: None,
+    });
+    completion.time_to_first_token_ms = (output == "first_token").then_some(10);
+    rollout.extend(target_rollout);
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout)
+        .await;
+    let expected_settings = if output == "none" {
+        source_settings
+    } else {
+        PreviousTurnSettings {
+            model: target.model.clone(),
+            model_runtime: target.model_runtime.clone(),
+            comp_hash: target.comp_hash.clone(),
+            cyber_access_program: target.cyber_access_program,
+            realtime_active: target.realtime_active,
+        }
+    };
+    assert_eq!(
+        reconstructed.previous_turn_settings,
+        Some(expected_settings)
+    );
+    assert_eq!(reconstructed.reference_context_item, Some(target));
+    let restored_history = reconstructed
+        .history
+        .into_iter()
+        .map(|item| item.item)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        strip_response_item_ids(&strip_metadata_from_items(&restored_history)),
+        strip_response_item_ids(&strip_metadata_from_items(&expected_history)),
+    );
+}
+
+#[test_case(false; "late rejection retains original source")]
+#[test_case(true; "late partial output establishes intermediate source")]
+#[tokio::test]
+async fn reconstruct_history_preserves_late_completion_runtime_evidence(output: bool) {
+    let (session, turn_context) = make_session_and_context().await;
+    let context = |name: &str| {
+        let mut context = turn_context.to_turn_context_item();
+        context.turn_id = Some(format!("{name}-turn"));
+        context.model = format!("{name}-model");
+        context.model_runtime = Some(TurnModelRuntime {
+            model_provider: format!("{name}-provider"),
+            model_executor: codex_protocol::external_executor::ModelExecutor::Codex,
+            model_context_window: Some(128_000),
+        });
+        context
+    };
+    let source = context("source");
+    let intermediate = context("intermediate");
+    let target = context("target");
+    let overflow = codex_protocol::protocol::ErrorEvent {
+        message: "request did not fit".to_owned(),
+        codex_error_info: Some(CodexErrorInfo::ContextWindowExceeded),
+        misalignment: None,
+    };
+    let mut rollout = completed_user_turn_rollout(source.clone(), Vec::new());
+    let mut intermediate_rollout = completed_user_turn_rollout(intermediate.clone(), Vec::new());
+    let mut late_completion = intermediate_rollout.pop().unwrap();
+    let RolloutItem::EventMsg(EventMsg::TurnComplete(completion)) = &mut late_completion else {
+        unreachable!();
+    };
+    completion.error = Some(overflow.clone());
+    completion.time_to_first_token_ms = output.then_some(10);
+    rollout.extend(intermediate_rollout);
+    let mut target_rollout = completed_user_turn_rollout(target.clone(), Vec::new());
+    let RolloutItem::EventMsg(EventMsg::TurnComplete(completion)) =
+        target_rollout.last_mut().unwrap()
+    else {
+        unreachable!();
+    };
+    completion.error = Some(overflow);
+    target_rollout.insert(target_rollout.len() - 1, late_completion);
+    rollout.extend(target_rollout);
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout)
+        .await;
+    let expected = if output { intermediate } else { source };
+    assert_eq!(
+        reconstructed.previous_turn_settings.unwrap().model_runtime,
+        expected.model_runtime,
+    );
+    assert_eq!(reconstructed.reference_context_item, Some(target));
+}
+
+#[tokio::test]
+async fn reconstruct_history_failed_first_attempt_has_no_previous_model() {
+    let (session, turn_context) = make_session_and_context().await;
+    let context = turn_context.to_turn_context_item();
+    let input = user_message("keep this request");
+    let mut rollout = completed_user_turn_rollout(
+        context.clone(),
+        vec![RolloutItem::ResponseItem(input.clone().into())],
+    );
+    let RolloutItem::EventMsg(EventMsg::TurnComplete(completion)) = rollout.last_mut().unwrap()
+    else {
+        unreachable!();
+    };
+    completion.error = Some(codex_protocol::protocol::ErrorEvent {
+        message: "provider authentication failed".to_owned(),
+        codex_error_info: Some(CodexErrorInfo::Unauthorized),
+        misalignment: None,
+    });
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout)
+        .await;
+    assert_eq!(reconstructed.previous_turn_settings, None);
+    assert_eq!(reconstructed.reference_context_item, Some(context));
+    let history = reconstructed
+        .history
+        .into_iter()
+        .map(|item| item.item)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        strip_response_item_ids(&strip_metadata_from_items(&history)),
+        strip_response_item_ids(&strip_metadata_from_items(&[input])),
+    );
+}
+
 #[test_case(None; "no source provider")]
 #[test_case(Some("source-provider"); "upstream executor defaults to codex")]
 #[tokio::test]

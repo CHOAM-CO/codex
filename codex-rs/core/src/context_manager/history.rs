@@ -1345,7 +1345,7 @@ fn estimate_function_output_bytes(output: &FunctionCallOutputBody) -> i64 {
     }
 }
 
-fn is_model_generated_item(item: &ResponseItem) -> bool {
+pub(crate) fn is_model_generated_item(item: &ResponseItem) -> bool {
     match item {
         ResponseItem::Message { role, .. } => role == "assistant",
         ResponseItem::Reasoning { .. }

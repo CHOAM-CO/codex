@@ -1,10 +1,12 @@
 use super::*;
 use crate::context::world_state::WorldStateSnapshot;
+use crate::context_manager::is_model_generated_item;
 use crate::context_manager::is_user_turn_boundary;
 use codex_history::ResponseItemEnvelope;
 use codex_history::TurnAttribution;
 use codex_protocol::protocol::SessionContextWindow;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnModelRuntime;
 use codex_utils_output_truncation::TruncationPolicy;
 use uuid::Uuid;
@@ -95,6 +97,8 @@ fn select_input_compaction(
 struct ActiveReplaySegment<'a> {
     turn_id: Option<String>,
     turn_completed: bool,
+    terminal_failure: bool,
+    has_model_output: bool,
     counts_as_user_turn: bool,
     previous_turn_settings: Option<PreviousTurnSettings>,
     reference_context_item: TurnReferenceContextItem,
@@ -105,6 +109,13 @@ struct ActiveReplaySegment<'a> {
 }
 
 impl ActiveReplaySegment<'_> {
+    fn record_completion(&mut self, event: &TurnCompleteEvent) {
+        self.turn_completed = true;
+        self.terminal_failure = event.error.is_some();
+        self.has_model_output |=
+            event.last_agent_message.is_some() || event.time_to_first_token_ms.is_some();
+    }
+
     fn take_checkpoint_attribution(&mut self, checkpoint: &mut Option<TurnAttribution>) {
         if checkpoint.as_ref().is_some_and(|attribution| {
             self.turn_id
@@ -165,8 +176,12 @@ fn finalize_active_segment<'a>(
         *window = active_segment.window;
     }
 
-    // Restore settings from the newest surviving context baseline.
-    if previous_turn_settings.is_none() && has_context_baseline {
+    // A context rejected before any output still establishes the input baseline, but it
+    // never became the previous model. Preserve the preceding source for a retry.
+    if previous_turn_settings.is_none()
+        && has_context_baseline
+        && (!active_segment.terminal_failure || active_segment.has_model_output)
+    {
         *previous_turn_settings = active_segment.previous_turn_settings;
     }
 
@@ -330,7 +345,7 @@ impl ContextManager {
         // we hit its matching `TurnStarted`, at which point the segment can be finalized.
         let mut checkpoint_attribution =
             resume_metadata.and_then(|metadata| metadata.turn_attribution.clone());
-        let mut late_completed_turn_ids = HashSet::new();
+        let mut late_completed_turns = HashMap::new();
         let mut active_segment: Option<ActiveReplaySegment<'_>> = None;
 
         for (index, item) in replay_items.iter().enumerate().rev() {
@@ -370,12 +385,12 @@ impl ContextManager {
                 RolloutItem::EventMsg(EventMsg::TurnComplete(event)) => {
                     // Stop hooks can finish after a newer turn has started.
                     if !turn_ids_are_compatible(preceding_turn_id, Some(event.turn_id.as_str())) {
-                        late_completed_turn_ids.insert(event.turn_id.as_str());
+                        late_completed_turns.insert(event.turn_id.as_str(), event);
                         continue;
                     }
                     let active_segment =
                         active_segment.get_or_insert_with(ActiveReplaySegment::default);
-                    active_segment.turn_completed = true;
+                    active_segment.record_completion(event);
                     // Reverse replay often sees `TurnComplete` before any turn-scoped metadata.
                     // Capture the turn id early so later `TurnContext` / abort items can match it.
                     if active_segment.turn_id.is_none() {
@@ -472,6 +487,11 @@ impl ContextManager {
                         active_segment
                             .turn_id
                             .get_or_insert_with(|| event.turn_id.clone());
+                        if let Some(completion) =
+                            late_completed_turns.remove(event.turn_id.as_str())
+                        {
+                            active_segment.record_completion(completion);
+                        }
                         active_segment.take_checkpoint_attribution(&mut checkpoint_attribution);
                         let segment_context = finalize_active_segment(
                             active_segment,
@@ -490,6 +510,8 @@ impl ContextManager {
                         active_segment.get_or_insert_with(ActiveReplaySegment::default);
                     active_segment.counts_as_user_turn |=
                         is_user_turn_boundary(&response_item.item);
+                    active_segment.has_model_output |= is_model_generated_item(&response_item.item)
+                        && !is_user_turn_boundary(&response_item.item);
                 }
                 RolloutItem::InterAgentCommunication(_) => {
                     let active_segment =
@@ -508,11 +530,14 @@ impl ContextManager {
 
         if let Some(mut active_segment) = active_segment.take() {
             active_segment.take_checkpoint_attribution(&mut checkpoint_attribution);
-            active_segment.turn_completed |= active_segment
+            if let Some(completion) = active_segment
                 .turn_id
                 .as_deref()
                 .or(checkpoint_turn_id)
-                .is_some_and(|turn_id| late_completed_turn_ids.contains(turn_id));
+                .and_then(|turn_id| late_completed_turns.get(turn_id))
+            {
+                active_segment.record_completion(completion);
+            }
             // A companion turn context only restores the context baseline. Once that turn
             // completes, its settings are newer than the compaction metadata.
             if resume_metadata.is_some() && !active_segment.turn_completed {

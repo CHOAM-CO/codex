@@ -410,7 +410,20 @@ async fn run_compact_task_inner_impl(
         get_last_assistant_message_from_turn(history_snapshot.raw_items()).unwrap_or_default()
     };
     let summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
-    let user_messages = collect_annotated_user_messages(history_items);
+    // A destination can reject its first request after this turn's input was recorded.
+    // Keep that exact input (including media) outside the historical-message text budget.
+    let is_pending_turn_input = |envelope: &&ResponseItemEnvelope| {
+        matches!(
+            compaction_metadata.reason(),
+            CompactionReason::ModelDownshift
+        ) && envelope.item.turn_id() == Some(turn_context.sub_id.as_str())
+            && crate::context_manager::is_user_turn_boundary(&envelope.item)
+    };
+    let user_messages = history_items
+        .iter()
+        .filter(|item| !is_pending_turn_input(item))
+        .filter_map(|envelope| compacted_user_message(&envelope.item, envelope.metadata.as_ref()))
+        .collect::<Vec<_>>();
 
     let mut new_history = build_compacted_history(Vec::new(), &user_messages, &summary_text);
     if let Some(summary_item) = new_history.last_mut() {
@@ -418,6 +431,7 @@ async fn run_compact_task_inner_impl(
         // belongs to this compaction turn.
         summary_item.set_turn_id_if_missing(&turn_context.sub_id);
     }
+    new_history.extend(history_items.iter().filter(is_pending_turn_input).cloned());
     let (window_number, window_ids) = sess.advance_auto_compact_window().await;
 
     let (new_history, world_state_baseline) = build_compaction_replacement_history(

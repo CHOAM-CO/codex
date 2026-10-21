@@ -186,19 +186,30 @@ pub(crate) async fn run_turn(
 
     let mut client_session =
         prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
+    // Keep the source until the selected model actually produces a response. A rejected
+    // first request must not make a provider transition lose its compaction source.
+    let previous_turn_settings = sess.previous_turn_settings().await;
+    let model_transition = previous_turn_settings
+        .as_ref()
+        .is_some_and(|previous| model_runtime_changed(previous, &turn_context));
+    let mut transition_compacted = false;
+    let mut model_response_started = false;
     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
     // new user message are recorded. Estimate pending incoming items (context
     // diffs/full reinjection + user input) and trigger compaction preemptively
     // when they would push the thread over the compaction threshold.
-    if auto_compaction_enabled
-        && let Err(err) = run_pre_sampling_compact(
+    let pre_sampling_compaction = if auto_compaction_enabled {
+        run_pre_sampling_compact(
             &sess,
             &turn_context,
             &mut client_session,
             &cancellation_token,
         )
         .await
-    {
+    } else {
+        Ok(false)
+    };
+    if let Err(err) = pre_sampling_compaction {
         // Compaction runs before the new input is recorded, so preserve it on every failure.
         run_hooks_and_record_inputs(
             &sess,
@@ -230,6 +241,8 @@ pub(crate) async fn run_turn(
         .await;
         error!("Failed to run pre-sampling compact");
         return Ok(None);
+    } else if let Ok(compacted) = pre_sampling_compaction {
+        transition_compacted = compacted;
     }
 
     let user_input = turn_user_input(&input);
@@ -399,14 +412,6 @@ pub(crate) async fn run_turn(
 
     sess.merge_connector_selection(explicitly_enabled_connectors.clone())
         .await;
-    sess.set_previous_turn_settings(Some(PreviousTurnSettings {
-        model: turn_context.model_info().slug.clone(),
-        model_runtime: Some(turn_context.model_runtime()),
-        cyber_access_program: turn_context.cyber_access_program,
-        comp_hash: turn_context.model_info().comp_hash.clone(),
-        realtime_active: Some(turn_context.realtime_active),
-    }))
-    .await;
     for response_item in injection_items {
         sess.record_conversation_items(
             &turn_context,
@@ -566,6 +571,7 @@ pub(crate) async fn run_turn(
                 Arc::clone(&turn_context.extension_data),
                 Arc::clone(&turn_diff_tracker),
                 &mut client_session,
+                &mut model_response_started,
                 sampling_request_input,
                 cancellation_token.child_token(),
             )
@@ -825,6 +831,33 @@ pub(crate) async fn run_turn(
                     }
                     break;
                 }
+                continue;
+            }
+            Err(err)
+                if auto_compaction_enabled
+                    && model_transition
+                    && matches!(err.details(), CodexErrorDetails::ContextWindowExceeded)
+                    && !transition_compacted
+                    && !model_response_started =>
+            {
+                // Provider tokenizers and newly recorded input can exceed the destination
+                // window even when the source's usage was below its estimated threshold.
+                // No model output or tool has started, so continue this same recorded turn.
+                transition_compacted = true;
+                let compacted = maybe_run_previous_model_inline_compact(
+                    &sess,
+                    &turn_context,
+                    &mut client_session,
+                    previous_turn_settings.as_ref(),
+                    /*context_overflow*/ true,
+                    &cancellation_token,
+                )
+                .await?;
+                if compacted.is_none() {
+                    return Err(err);
+                }
+                ensure_compacted_history_fits(&sess, &turn_context).await?;
+                can_drain_pending_input = false;
                 continue;
             }
             Err(err)
@@ -1375,27 +1408,25 @@ async fn run_pre_sampling_compact(
     turn_context: &Arc<TurnContext>,
     client_session: &mut ModelClientSession,
     cancellation_token: &CancellationToken,
-) -> CodexResult<()> {
+) -> CodexResult<bool> {
+    let previous_turn_settings = sess.previous_turn_settings().await;
     let compacted_previous = maybe_run_previous_model_inline_compact(
         sess,
         turn_context,
         client_session,
+        previous_turn_settings.as_ref(),
+        /*context_overflow*/ false,
         cancellation_token,
     )
     .await?;
     let token_status =
         super::context_window::context_window_token_status(sess.as_ref(), turn_context.as_ref())
             .await;
-    if compacted_previous {
+    if matches!(compacted_previous, Some(CompactionReason::ModelDownshift)) {
         // A model transition runs one compaction operation. Do not compact again with the
         // smaller model, or sample a response against a history that still cannot fit there.
-        if token_status.token_limit_reached {
-            return Err(CodexErr::InvalidRequest(format!(
-                "Previous-model compaction completed, but the resulting context still exceeds the budget for {}. The new model has not been called.",
-                turn_context.model_info().slug
-            )));
-        }
-        return Ok(());
+        ensure_compacted_history_fits(sess, turn_context).await?;
+        return Ok(true);
     }
     let candidate = super::async_compaction::take_ready(sess, turn_context).await;
     // Compact if the configured auto-compaction budget or usable context window is exhausted.
@@ -1404,7 +1435,7 @@ async fn run_pre_sampling_compact(
         let step_context = sess
             .capture_step_context(Arc::clone(turn_context), cancellation_token)
             .await?;
-        run_auto_compact(
+        let installed = run_auto_compact(
             sess,
             Arc::clone(&step_context),
             step_context,
@@ -1414,6 +1445,21 @@ async fn run_pre_sampling_compact(
             candidate,
         )
         .await?;
+        return Ok(installed || compacted_previous.is_some());
+    }
+    Ok(compacted_previous.is_some())
+}
+
+async fn ensure_compacted_history_fits(
+    sess: &Session,
+    turn_context: &TurnContext,
+) -> CodexResult<()> {
+    let token_status = super::context_window::context_window_token_status(sess, turn_context).await;
+    if token_status.token_limit_reached {
+        return Err(CodexErr::InvalidRequest(format!(
+            "Previous-model compaction completed, but the resulting context still exceeds the budget for {}. No further request was sent to the new model.",
+            turn_context.model_info().slug
+        )));
     }
     Ok(())
 }
@@ -1426,40 +1472,42 @@ fn comp_hash_changed(previous: Option<&str>, current: Option<&str>) -> bool {
         .is_some_and(|(previous, current)| previous != current)
 }
 
+fn model_runtime_changed(previous: &PreviousTurnSettings, current: &TurnContext) -> bool {
+    previous.model != current.model_info().slug
+        || previous.model_runtime.as_ref().is_some_and(|runtime| {
+            runtime.model_provider != current.config.model_provider_id
+                || runtime.model_executor != current.config.model_executor
+        })
+}
+
 /// Runs pre-sampling compaction against the previous model when its compaction compatibility
 /// hash changed or when switching to a smaller context-window model.
 ///
-/// Returns whether model-downshift compaction was installed. Failures stop the destination request.
+/// Returns the installed compaction reason. Failures stop the destination request.
 async fn maybe_run_previous_model_inline_compact(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
     client_session: &mut ModelClientSession,
+    previous_turn_settings: Option<&PreviousTurnSettings>,
+    context_overflow: bool,
     cancellation_token: &CancellationToken,
-) -> CodexResult<bool> {
-    let Some(previous_turn_settings) = sess.previous_turn_settings().await else {
-        return Ok(false);
+) -> CodexResult<Option<CompactionReason>> {
+    let Some(previous_turn_settings) = previous_turn_settings else {
+        return Ok(None);
     };
     let should_compact_for_comp_hash_change = comp_hash_changed(
         previous_turn_settings.comp_hash.as_deref(),
         turn_context.model_info().comp_hash.as_deref(),
     );
-    let previous_model = previous_turn_settings.model;
-    let runtime_changed = previous_turn_settings
-        .model_runtime
-        .as_ref()
-        .is_some_and(|runtime| {
-            runtime.model_provider != turn_context.config.model_provider_id
-                || runtime.model_executor != turn_context.config.model_executor
-        });
+    let previous_model = &previous_turn_settings.model;
     if !should_compact_for_comp_hash_change
-        && previous_model == turn_context.model_info().slug
-        && !runtime_changed
+        && !model_runtime_changed(previous_turn_settings, turn_context)
     {
-        return Ok(false);
+        return Ok(None);
     }
     let status = super::context_window::context_window_token_status(sess, turn_context).await;
-    if !should_compact_for_comp_hash_change && !status.token_limit_reached {
-        return Ok(false);
+    if !context_overflow && !should_compact_for_comp_hash_change && !status.token_limit_reached {
+        return Ok(None);
     }
     let runtime = previous_turn_settings.model_runtime.as_ref().ok_or_else(|| {
         CodexErr::InvalidRequest(format!(
@@ -1496,12 +1544,12 @@ async fn maybe_run_previous_model_inline_compact(
             AutoCompactTokenLimitScope::Total => status.token_limit_reached,
             AutoCompactTokenLimitScope::BodyAfterPrefix => status.full_context_window_limit_reached,
         };
-    let reason = if smaller_window && previous_model_limit_reached {
+    let reason = if context_overflow || (smaller_window && previous_model_limit_reached) {
         CompactionReason::ModelDownshift
     } else if should_compact_for_comp_hash_change {
         CompactionReason::CompHashChanged
     } else {
-        return Ok(false);
+        return Ok(None);
     };
 
     let step_context = sess
@@ -1521,7 +1569,7 @@ async fn maybe_run_previous_model_inline_compact(
         /*candidate*/ None,
     )
     .await?;
-    Ok(installed && matches!(reason, CompactionReason::ModelDownshift))
+    Ok(installed.then_some(reason))
 }
 
 /// The replacement context may use a different model than the compactor.
@@ -1770,6 +1818,7 @@ async fn run_sampling_request(
     turn_store: Arc<codex_extension_api::ExtensionData>,
     turn_diff_tracker: SharedTurnDiffTracker,
     client_session: &mut ModelClientSession,
+    model_response_started: &mut bool,
     input: Vec<ResponseItem>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>)> {
@@ -1839,6 +1888,7 @@ async fn run_sampling_request(
             Arc::clone(&step_context),
             Arc::clone(&turn_store),
             client_session,
+            model_response_started,
             &responses_metadata,
             Arc::clone(&turn_diff_tracker),
             &prompt,
@@ -2682,6 +2732,7 @@ async fn try_run_sampling_request(
     step_context: Arc<StepContext>,
     turn_store: Arc<codex_extension_api::ExtensionData>,
     client_session: &mut ModelClientSession,
+    model_response_started: &mut bool,
     responses_metadata: &CodexResponsesMetadata,
     turn_diff_tracker: SharedTurnDiffTracker,
     prompt: &Prompt,
@@ -2850,6 +2901,31 @@ async fn try_run_sampling_request(
             .session_telemetry
             .record_responses(&handle_responses, &event);
         record_turn_ttft_metric(&turn_context, &event).await;
+
+        if !*model_response_started
+            && matches!(
+                event,
+                ResponseEvent::OutputItemAdded(_)
+                    | ResponseEvent::OutputItemDone(_)
+                    | ResponseEvent::OutputTextDelta(_)
+                    | ResponseEvent::ToolCallInputDelta { .. }
+                    | ResponseEvent::ReasoningSummaryDelta { .. }
+                    | ResponseEvent::ReasoningSummaryPartAdded { .. }
+                    | ResponseEvent::ReasoningSummaryDone { .. }
+                    | ResponseEvent::ReasoningContentDelta { .. }
+                    | ResponseEvent::Completed { .. }
+            )
+        {
+            *model_response_started = true;
+            sess.set_previous_turn_settings(Some(PreviousTurnSettings {
+                model: turn_context.model_info().slug.clone(),
+                model_runtime: Some(turn_context.model_runtime()),
+                cyber_access_program: turn_context.cyber_access_program,
+                comp_hash: turn_context.model_info().comp_hash.clone(),
+                realtime_active: Some(turn_context.realtime_active),
+            }))
+            .await;
+        }
 
         match event {
             ResponseEvent::Created { response_id } => {

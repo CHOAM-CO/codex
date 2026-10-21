@@ -91,6 +91,7 @@ async fn transition_test_session_with_capabilities(
                 config.chatgpt_base_url = source_url;
                 config.model_context_window = Some(200_000);
                 config.model_auto_compact_token_limit = Some(150_000);
+                config.update_plan_enabled = true;
                 let _ = config.features.disable(Feature::TokenBudget);
             },
         )
@@ -347,6 +348,283 @@ async fn same_model_slug_uses_previous_provider_catalog_for_compaction() {
             .await
             .is_empty()
     );
+}
+
+async fn use_below_destination_budget(session: &Session) {
+    session
+        .state
+        .lock()
+        .await
+        .set_token_info(Some(codex_protocol::protocol::TokenUsageInfo {
+            total_token_usage: Default::default(),
+            last_token_usage: codex_protocol::protocol::TokenUsage {
+                input_tokens: 100_000,
+                total_tokens: 100_000,
+                ..Default::default()
+            },
+            model_context_window: Some(500_000),
+        }));
+}
+
+fn transition_input(text: String) -> Vec<TurnInput> {
+    vec![TurnInput::UserInput {
+        content: vec![UserInput::Text {
+            text,
+            text_elements: Vec::new(),
+        }],
+        client_id: None,
+        metadata: Default::default(),
+    }]
+}
+
+fn destination_context_error() -> wiremock::ResponseTemplate {
+    wiremock::ResponseTemplate::new(400).set_body_json(serde_json::json!({
+        "error": {
+            "type": "invalid_request_error",
+            "code": "context_length_exceeded",
+            "message": "The destination tokenizer reports that the prompt exceeds its context."
+        }
+    }))
+}
+
+#[test_case::test_case(false; "destination tokenizer differs")]
+#[test_case::test_case(true; "new input crosses destination window")]
+#[tokio::test]
+async fn actual_destination_overflow_compacts_source_and_retries_same_turn(long_input: bool) {
+    use core_test_support::responses;
+    let source = responses::start_mock_server().await;
+    let destination = responses::start_mock_server().await;
+    let source_requests = responses::mount_sse_once(
+        &source,
+        responses::sse(vec![
+            responses::ev_assistant_message("summary", "Preserved the original requirement."),
+            responses::ev_completed("source-compaction"),
+        ]),
+    )
+    .await;
+    let destination_requests = responses::mount_response_sequence(
+        &destination,
+        vec![
+            destination_context_error(),
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(responses::sse(vec![
+                    responses::ev_assistant_message("answer", "Completed the requested work."),
+                    responses::ev_completed("destination-answer"),
+                ])),
+        ],
+    )
+    .await;
+    let (session, turn, _) = transition_test_session(source.uri(), destination.uri()).await;
+    use_below_destination_budget(&session).await;
+    let input = if long_input {
+        "New request details. ".repeat(6_000)
+    } else {
+        "Continue the original requirement with this new detail.".to_string()
+    };
+    let result = run_turn(
+        session.clone(),
+        turn.clone(),
+        transition_input(input.clone()),
+        &mut McpStartupRequirements::default(),
+        None,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.as_deref(), Some("Completed the requested work."));
+    let source_calls = source_requests.requests();
+    assert_eq!(source_calls.len(), 1);
+    assert_eq!(source_calls[0].body_json()["model"], "source-model");
+    assert!(source_calls[0].message_input_texts("user").contains(&input));
+    let target_calls = destination_requests.requests();
+    assert_eq!(target_calls.len(), 2);
+    for request in &target_calls {
+        assert_eq!(request.body_json()["model"], "destination-model");
+        assert_eq!(
+            request
+                .message_input_texts("user")
+                .iter()
+                .filter(|text| *text == &input)
+                .count(),
+            1
+        );
+    }
+    assert!(
+        target_calls[1]
+            .message_input_texts("user")
+            .iter()
+            .any(|text| { text.contains("Preserved the original requirement.") })
+    );
+    let previous = session.previous_turn_settings().await.unwrap();
+    assert_eq!(previous.model, "destination-model");
+    assert_eq!(previous.model_runtime, Some(turn.model_runtime()));
+}
+
+#[test_case::test_case(true; "pre-sampling compaction already ran")]
+#[test_case::test_case(false; "destination rejects compacted context")]
+#[tokio::test]
+async fn destination_overflow_never_repeats_transition_compaction(compact_before_sampling: bool) {
+    use core_test_support::responses;
+    let source = responses::start_mock_server().await;
+    let destination = responses::start_mock_server().await;
+    let source_requests = responses::mount_sse_once(
+        &source,
+        responses::sse(vec![
+            responses::ev_assistant_message("summary", "The original requirement is preserved."),
+            responses::ev_completed("source-compaction"),
+        ]),
+    )
+    .await;
+    let expected_destination_requests = if compact_before_sampling { 1 } else { 2 };
+    let destination_requests = responses::mount_response_sequence(
+        &destination,
+        vec![destination_context_error(); expected_destination_requests],
+    )
+    .await;
+    let (session, turn, _) = transition_test_session(source.uri(), destination.uri()).await;
+    if !compact_before_sampling {
+        use_below_destination_budget(&session).await;
+    }
+    let previous = session.previous_turn_settings().await;
+    let result = run_turn(
+        session.clone(),
+        turn,
+        transition_input("Keep this user request.".to_string()),
+        &mut McpStartupRequirements::default(),
+        None,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result, None);
+    assert_eq!(source_requests.requests().len(), 1);
+    assert_eq!(
+        destination_requests.requests().len(),
+        expected_destination_requests
+    );
+    assert_eq!(session.previous_turn_settings().await, previous);
+}
+
+#[test_case::test_case("context_length_exceeded"; "source context limit")]
+#[test_case::test_case("server_error"; "source stream failure")]
+#[tokio::test]
+async fn failed_overflow_compaction_preserves_source_and_does_not_retry_destination(
+    source_error: &str,
+) {
+    use core_test_support::responses;
+    let source = responses::start_mock_server().await;
+    let destination = responses::start_mock_server().await;
+    let source_requests = responses::mount_sse_once(
+        &source,
+        responses::sse_failed("source-failed", source_error, "Source cannot compact."),
+    )
+    .await;
+    let destination_requests =
+        responses::mount_response_once(&destination, destination_context_error()).await;
+    let (session, turn, _) = transition_test_session(source.uri(), destination.uri()).await;
+    use_below_destination_budget(&session).await;
+    let previous = session.previous_turn_settings().await;
+    let result = run_turn(
+        session.clone(),
+        turn,
+        transition_input("Keep this user request.".to_string()),
+        &mut McpStartupRequirements::default(),
+        None,
+        CancellationToken::new(),
+    )
+    .await;
+    let error = result.unwrap_err();
+    assert_eq!(
+        matches!(error.details(), CodexErrorDetails::ContextWindowExceeded),
+        source_error == "context_length_exceeded"
+    );
+    assert_eq!(source_requests.requests().len(), 1);
+    assert_eq!(destination_requests.requests().len(), 1);
+    assert_eq!(session.previous_turn_settings().await, previous);
+    let history = session.clone_history().await;
+    assert!(history.raw_items().any(|item| {
+        matches!(item, ResponseItem::Message { content, .. } if content.iter().any(|part| {
+            matches!(part, ContentItem::InputText { text } if text == "Keep the original requirement.")
+        }))
+    }));
+    assert!(history.raw_items().any(|item| {
+        matches!(item, ResponseItem::Message { content, .. } if content.iter().any(|part| {
+            matches!(part, ContentItem::InputText { text } if text == "Keep this user request.")
+        }))
+    }));
+}
+
+#[test_case::test_case(false; "partial assistant output")]
+#[test_case::test_case(true; "tool call already executed")]
+#[tokio::test]
+async fn overflow_after_model_output_never_replays_the_request(tool_call: bool) {
+    use core_test_support::responses;
+    let source = responses::start_mock_server().await;
+    let destination = responses::start_mock_server().await;
+    let mut events = vec![responses::ev_response_created("partial-destination")];
+    if tool_call {
+        events.push(responses::ev_function_call(
+            "plan-once",
+            "update_plan",
+            r#"{"plan":[{"step":"Record the observed progress","status":"completed"}]}"#,
+        ));
+    } else {
+        events.push(responses::ev_message_item_added("partial-message", ""));
+        events.push(responses::ev_output_text_delta(
+            "Already started answering.",
+        ));
+    }
+    events.push(serde_json::json!({
+        "type": "response.failed",
+        "response": {
+            "id": "partial-destination",
+            "error": {"code": "context_length_exceeded", "message": "Context overflow after progress."}
+        }
+    }));
+    let destination_requests =
+        responses::mount_sse_once(&destination, responses::sse(events)).await;
+    let (session, turn, _) = transition_test_session(source.uri(), destination.uri()).await;
+    use_below_destination_budget(&session).await;
+    let result = run_turn(
+        session.clone(),
+        turn.clone(),
+        transition_input("Start this request once.".to_string()),
+        &mut McpStartupRequirements::default(),
+        None,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result, None);
+    assert_eq!(destination_requests.requests().len(), 1);
+    assert!(
+        responses::received_responses_requests(&source)
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        session
+            .previous_turn_settings()
+            .await
+            .unwrap()
+            .model_runtime,
+        Some(turn.model_runtime())
+    );
+    if tool_call {
+        let history = session.clone_history().await;
+        let outputs = history
+            .raw_items()
+            .filter_map(|item| match item {
+                ResponseItem::FunctionCallOutput {
+                    call_id, output, ..
+                } if call_id.as_deref() == Some("plan-once") => Some(output),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].text_content(), Some("Plan updated"));
+    }
 }
 
 #[tokio::test]

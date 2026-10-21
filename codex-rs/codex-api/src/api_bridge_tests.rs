@@ -190,6 +190,61 @@ fn map_api_error_maps_cloudflare_blocked_response_to_user_message() {
 }
 
 #[test]
+fn map_api_error_maps_context_length_exceeded_from_400_body() {
+    let error = serde_json::json!({
+        "type": "invalid_request_error",
+        "code": "context_length_exceeded",
+        "message": "The request exceeds the model context."
+    });
+    for body in [
+        serde_json::json!({"error": error}),
+        serde_json::json!({"type": "error", "status": 400, "error": error}),
+    ] {
+        let err = map_api_error(ApiError::Transport(TransportError::Http {
+            retry_after: None,
+            status: http::StatusCode::BAD_REQUEST,
+            url: Some("http://example.com/v1/responses".to_string()),
+            headers: None,
+            body: Some(body.to_string()),
+        }));
+
+        assert!(matches!(
+            err.details(),
+            CodexErrorDetails::ContextWindowExceeded
+        ));
+        assert_eq!(
+            err.to_codex_protocol_error(),
+            CodexErrorInfo::ContextWindowExceeded
+        );
+        assert_eq!(err.retry_delay(/*retry_count*/ 1), None);
+    }
+}
+
+#[test]
+fn map_api_error_requires_structured_context_length_exceeded_code() {
+    for body in [
+        serde_json::json!({"error": {"type": "invalid_request_error", "message": "context_length_exceeded"}}).to_string(),
+        serde_json::json!({"error": {"type": "context_length_exceeded"}}).to_string(),
+        serde_json::json!({"error": {"code": "invalid_request_error"}}).to_string(),
+        serde_json::json!({"error": {"code": 400}}).to_string(),
+        "context_length_exceeded".to_string(),
+    ] {
+        let err = map_api_error(ApiError::Transport(TransportError::Http {
+            retry_after: None,
+            status: http::StatusCode::BAD_REQUEST,
+            url: None,
+            headers: None,
+            body: Some(body.clone()),
+        }));
+
+        let CodexErrorDetails::InvalidRequest(message) = err.details() else {
+            panic!("expected unchanged InvalidRequest, got {err:?}");
+        };
+        assert_eq!(message, &body);
+    }
+}
+
+#[test]
 fn map_api_error_maps_cyber_policy_from_400_body() {
     let body = serde_json::json!({
         "error": {

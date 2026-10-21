@@ -150,9 +150,13 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
                         && let Some(
                             code @ (CYBER_POLICY_ERROR_CODE
                             | BIO_POLICY_ERROR_CODE
-                            | INVALID_PROMPT_ERROR_CODE),
+                            | INVALID_PROMPT_ERROR_CODE
+                            | "context_length_exceeded"),
                         ) = error.get("code").and_then(Value::as_str)
                     {
+                        if code == "context_length_exceeded" {
+                            return CodexErr::ContextWindowExceeded;
+                        }
                         let fallback_message = if code == BIO_POLICY_ERROR_CODE {
                             BIO_POLICY_FALLBACK_MESSAGE
                         } else if code == INVALID_PROMPT_ERROR_CODE {
