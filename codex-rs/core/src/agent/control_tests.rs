@@ -6293,6 +6293,12 @@ async fn mixed_provider_fork_preserves_target_across_send_interrupt_and_reload(
         .unwrap()
         .thread_id;
     let sibling = harness.manager.get_thread(sibling_id).await.unwrap();
+    // This sibling only checks history/settings isolation. Finish its initial task's
+    // native abort cleanup before taking the baseline so startup context cannot race it.
+    sibling
+        .session
+        .abort_all_tasks(TurnAbortReason::Interrupted)
+        .await;
     let parent_history: Vec<_> = parent
         .session
         .clone_history()
