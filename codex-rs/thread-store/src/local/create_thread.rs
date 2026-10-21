@@ -41,6 +41,12 @@ pub(super) async fn create_thread(
         )
         .with_creator(params.creator_user_id, params.creator_account_id)
         .with_session_id(params.session_id)
+        .with_model_executor(
+            params
+                .extra_config
+                .as_ref()
+                .and_then(|extra| extra.model_executor),
+        )
         .with_selected_capability_roots(params.selected_capability_roots)
         .with_runtime_workspace_roots(params.runtime_workspace_roots.map(|roots| {
             roots

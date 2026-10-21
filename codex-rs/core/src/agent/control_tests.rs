@@ -1360,6 +1360,7 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
     }
 
     let mut sender_config = harness.config.clone();
+    sender_config.model_executor = codex_protocol::external_executor::ModelExecutor::Antigravity;
     sender_config.model_provider_id = "ollama".to_string();
     sender_config.model_provider = sender_config
         .model_providers
@@ -1426,6 +1427,11 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
             crate::ThreadEvictionOutcome::Busy,
         );
     }
+    assert_eq!(
+        reloaded_child.config_snapshot().await.model_executor,
+        codex_protocol::external_executor::ModelExecutor::Codex,
+        "cold child restores its stored executor instead of inheriting the sender's executor"
+    );
     let reloaded_instructions = reloaded_child.session.inherited_instructions().await;
     assert_eq!(
         (reloaded_instructions.user, reloaded_instructions.thread),
@@ -2406,6 +2412,7 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix(
                         disabled_plugin_ids: Vec::new(),
                         model: "parent-only-model".to_string(),
                         model_provider_id: "parent-only-provider".to_string(),
+                        model_executor: None,
                         service_tier: None,
                         approval_policy: AskForApproval::Never,
                         approvals_reviewer: ApprovalsReviewer::User,
@@ -5127,11 +5134,28 @@ async fn resume_agent_from_paginated_rollout_loads_model_context(disabled_plugin
         ThreadHistoryMode::Paginated
     );
     persist_thread_for_tree_resume(&child_thread, "persist before resume").await;
+    let saved_child_model = child_thread.config_snapshot().await.model;
     let _ = harness
         .control
         .shutdown_live_agent(child_thread_id)
         .await
         .expect("child shutdown should succeed");
+
+    // Older stores may omit the latest model even though owned settings remain
+    // in canonical history. This production entry uses Exec, not a child source.
+    let state_db = harness.state_db.as_ref().expect("paginated state database");
+    let mut stored_metadata = state_db.get_thread(child_thread_id).await.unwrap().unwrap();
+    stored_metadata.model = None;
+    state_db.upsert_thread(&stored_metadata).await.unwrap();
+    assert!(
+        state_db
+            .get_thread(child_thread_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .model
+            .is_none()
+    );
 
     // Resuming restores the child's saved selection even after its parent changes.
     parent_thread
@@ -5142,9 +5166,11 @@ async fn resume_agent_from_paginated_rollout_loads_model_context(disabled_plugin
         .await
         .expect("change parent plugin selection");
 
+    let mut sender_config = harness.config.clone();
+    sender_config.model = Some("different-parent-model".into());
     let resumed_thread_id = harness
         .control
-        .resume_agent_from_rollout(harness.config.clone(), child_thread_id, SessionSource::Exec)
+        .resume_agent_from_rollout(sender_config, child_thread_id, SessionSource::Exec)
         .await
         .expect("resume should load paginated model context");
     assert_eq!(resumed_thread_id, child_thread_id);
@@ -5153,6 +5179,10 @@ async fn resume_agent_from_paginated_rollout_loads_model_context(disabled_plugin
         .get_thread(resumed_thread_id)
         .await
         .expect("resumed child thread should exist");
+    assert_eq!(
+        resumed_thread.config_snapshot().await.model,
+        saved_child_model
+    );
     assert_eq!(
         resumed_thread
             .thread_settings_snapshot()
@@ -6050,4 +6080,413 @@ async fn resume_agent_from_rollout_skips_descendants_when_parent_resume_fails() 
         .shutdown_agent_tree(parent_thread_id)
         .await
         .expect("tree shutdown after partial subtree resume should succeed");
+}
+
+/// Uses the runtime's actual model client while avoiding any inference transport.
+async fn provider_history_request(thread: &CodexThread) -> codex_api::ResponsesApiRequest {
+    let before: Vec<_> = thread
+        .session
+        .clone_history()
+        .await
+        .raw_items()
+        .cloned()
+        .collect();
+    let turn = thread.session.new_default_turn().await;
+    let step = StepContext::for_test(Arc::clone(&turn));
+    let prompt = crate::session::turn::build_prompt(
+        thread
+            .session
+            .clone_history()
+            .await
+            .for_prompt(&step.settings.model_info.input_modalities),
+        &step,
+        thread.session.get_prompt_base_instructions().await,
+        thread
+            .session
+            .current_window_uses_incremental_tools(&step)
+            .await,
+    );
+    let metadata = thread
+        .session
+        .responses_metadata(&step, CodexResponsesRequestKind::Turn)
+        .await;
+    let request = thread
+        .session
+        .services
+        .model_client
+        .build_responses_request(
+            &prompt,
+            &step.settings.model_info,
+            None,
+            ReasoningSummary::None,
+            None,
+            &metadata,
+            true,
+        )
+        .expect("construct request without transport");
+    assert_eq!(
+        thread
+            .session
+            .clone_history()
+            .await
+            .raw_items()
+            .cloned()
+            .collect::<Vec<_>>(),
+        before
+    );
+    request
+}
+
+fn inherited_tool_content<'a>(
+    items: impl IntoIterator<Item = &'a ResponseItem>,
+) -> Option<serde_json::Value> {
+    items
+        .into_iter()
+        .find(|item| {
+            matches!(item,
+                ResponseItem::FunctionCallOutput { call_id, .. } if call_id.as_deref() == Some("shared-tool")
+            )
+        })
+        .map(|item| serde_json::to_value(item).unwrap()["output"].clone())
+}
+
+#[test_case::test_case(None, false; "fresh without encrypted support")]
+#[test_case::test_case(None, true; "fresh with encrypted support")]
+#[test_case::test_case(Some(SpawnAgentForkMode::FullHistory), false; "full history without encrypted support")]
+#[test_case::test_case(Some(SpawnAgentForkMode::FullHistory), true; "full history with encrypted support")]
+#[tokio::test]
+async fn mixed_provider_fork_preserves_target_across_send_interrupt_and_reload(
+    fork_mode: Option<SpawnAgentForkMode>,
+    supports_encrypted_content: bool,
+) {
+    use codex_model_provider_info::ModelProviderCapabilities;
+    use codex_protocol::external_executor::ModelExecutor;
+    use codex_protocol::models::FunctionCallOutputContentItem;
+    use codex_protocol::provider_history::UNAVAILABLE_ENCRYPTED_CONTENT;
+    let (home, mut config) = test_config().await;
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    let _ = config.features.enable(Feature::Sqlite);
+    config.model = Some("gpt-6.1-sol".into());
+    config.multi_agent_v2.preserve_fork_prefix = true;
+    config
+        .model_providers
+        .get_mut("ollama")
+        .unwrap()
+        .capabilities = Some(ModelProviderCapabilities {
+        encrypted_content: Some(supports_encrypted_content),
+        ..Default::default()
+    });
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let (parent_id, parent) = harness.start_paginated_thread().await;
+    let control = parent
+        .session
+        .services
+        .local_agent_runtime
+        .control(parent.session.session_id());
+    let inherited: Vec<ResponseItem> = serde_json::from_value(serde_json::json!([
+        {"type":"message","id":"msg_inherited-user","role":"user","content":[{"type":"input_text","text":"Use the existing source material"}]},
+        {"type":"function_call","id":"fc_inherited-source","name":"source","arguments":"{}","call_id":"shared-tool"},
+        {"type":"function_call_output","id":"fco_inherited-source","call_id":"shared-tool","output":[
+            {"type":"input_text","text":"{\"encrypted_content\":\"literal data\"}"},
+            {"type":"encrypted_content","encrypted_content":"opaque-source"}
+        ]}
+    ])).unwrap();
+    parent
+        .inject_response_items(inherited.clone())
+        .await
+        .unwrap();
+    let inherited_ids: Vec<_> = inherited
+        .iter()
+        .map(|item| item.id().unwrap().clone())
+        .collect();
+    let inherited_items = |items: &[ResponseItem]| {
+        items
+            .iter()
+            .filter(|item| item.id().is_some_and(|id| inherited_ids.contains(id)))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let recorded_inherited = inherited_items(
+        &parent
+            .session
+            .clone_history()
+            .await
+            .raw_items()
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
+    let mut recorded_payloads = recorded_inherited.clone();
+    for item in &mut recorded_payloads {
+        item.clear_internal_chat_message_metadata_passthrough();
+    }
+    assert_eq!(recorded_payloads, inherited);
+    let original = inherited_tool_content(parent.session.clone_history().await.raw_items())
+        .expect("parent has the source tool result");
+    parent
+        .inject_response_items(vec![spawn_agent_call("mixed-provider-fork")])
+        .await
+        .unwrap();
+    let mut child_config = harness.config.clone();
+    child_config.model = Some("local-research-model".into());
+    child_config.model_provider_id = "ollama".into();
+    child_config.model_provider = child_config.model_providers["ollama"].clone();
+    let expected_provider = child_config.model_provider.clone();
+    let inherits_history = fork_mode.is_some();
+    let expected_child_history = if inherits_history {
+        recorded_inherited
+    } else {
+        Vec::new()
+    };
+    let mut expected_request_history = expected_child_history.clone();
+    for item in &mut expected_request_history {
+        item.clear_internal_chat_message_metadata_passthrough();
+    }
+    if inherits_history && !supports_encrypted_content {
+        let ResponseItem::FunctionCallOutput { output, .. } = &mut expected_request_history[2]
+        else {
+            panic!("third inherited item is the source tool result");
+        };
+        output.content_items_mut().unwrap()[1] = FunctionCallOutputContentItem::InputText {
+            text: UNAVAILABLE_ENCRYPTED_CONTENT.into(),
+        };
+    }
+    let child = control
+        .spawn_agent_with_metadata(
+            child_config,
+            text_input("Read the copied context"),
+            thread_spawn_source(
+                parent_id,
+                &parent.session_source,
+                1,
+                None,
+                Some("worker".into()),
+            )
+            .unwrap(),
+            SpawnAgentOptions {
+                parent_thread_id: Some(parent_id),
+                fork_parent_spawn_call_id: fork_mode.as_ref().map(|_| "mixed-provider-fork".into()),
+                fork_mode,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let child_id = child.thread_id;
+    let sibling_id = control
+        .spawn_agent_with_metadata(
+            harness.config.clone(),
+            text_input("Sibling task"),
+            thread_spawn_source(
+                parent_id,
+                &parent.session_source,
+                1,
+                None,
+                Some("sibling".into()),
+            )
+            .unwrap(),
+            SpawnAgentOptions {
+                parent_thread_id: Some(parent_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .thread_id;
+    let sibling = harness.manager.get_thread(sibling_id).await.unwrap();
+    let parent_history: Vec<_> = parent
+        .session
+        .clone_history()
+        .await
+        .raw_items()
+        .cloned()
+        .collect();
+    let sibling_history: Vec<_> = sibling
+        .session
+        .clone_history()
+        .await
+        .raw_items()
+        .cloned()
+        .collect();
+    let followup_messages = [
+        "Continue with the readable source",
+        "Continue after the cold reload",
+    ];
+    for phase in 0..3 {
+        if phase == 2 {
+            control
+                .interrupt(parent_id, AgentTarget::Id(child_id), MultiAgentVersion::V2)
+                .await
+                .unwrap();
+            let loaded = harness.manager.get_thread(child_id).await.unwrap();
+            loaded
+                .inject_response_items(vec![assistant_message(
+                    "Child-specific completed progress before reload",
+                    None,
+                )])
+                .await
+                .unwrap();
+            let before_reload: Vec<_> = loaded
+                .session
+                .clone_history()
+                .await
+                .raw_items()
+                .cloned()
+                .collect();
+            loaded.shutdown_and_wait().await.unwrap();
+            assert!(harness.manager.remove_thread(&child_id).await.is_some());
+            let pin = control
+                .ensure_v2_agent_loaded(harness.config.clone(), child_id, None)
+                .await
+                .unwrap();
+            drop(pin);
+            let reloaded = harness.manager.get_thread(child_id).await.unwrap();
+            let after_reload: Vec<_> = reloaded
+                .session
+                .clone_history()
+                .await
+                .raw_items()
+                .cloned()
+                .collect();
+            assert!(
+                after_reload.starts_with(&before_reload),
+                "cold reload must preserve the complete child history before any new startup records"
+            );
+        }
+        if phase > 0 {
+            let receipt = control
+                .send(SendRequest {
+                    caller: parent_id,
+                    target: AgentTarget::Id(child_id),
+                    resume_config: harness.config.clone(),
+                    input: AgentInput::Message {
+                        message: AgentMessage::Plaintext(followup_messages[phase - 1].into()),
+                        mode: MessageDeliveryMode::TriggerTurn,
+                    },
+                    start_options: Default::default(),
+                })
+                .await
+                .unwrap();
+            assert_eq!(receipt.thread_id, child_id);
+        }
+        let loaded = harness.manager.get_thread(child_id).await.unwrap();
+        let snapshot = loaded.config_snapshot().await;
+        assert_eq!(snapshot.model, "local-research-model", "phase {phase}");
+        assert_eq!(snapshot.model_provider_id, "ollama", "phase {phase}");
+        assert_eq!(
+            snapshot.model_executor,
+            ModelExecutor::Codex,
+            "phase {phase}"
+        );
+        assert_eq!(
+            loaded.session.new_default_turn().await.provider.info(),
+            &expected_provider
+        );
+        let raw_before: Vec<_> = loaded
+            .session
+            .clone_history()
+            .await
+            .raw_items()
+            .cloned()
+            .collect();
+        assert_eq!(
+            inherited_items(&raw_before),
+            expected_child_history,
+            "phase {phase}"
+        );
+        assert_eq!(
+            inherited_tool_content(&raw_before),
+            inherits_history.then(|| original.clone())
+        );
+        let request = provider_history_request(&loaded).await;
+        assert_eq!(request.model, "local-research-model", "phase {phase}");
+        assert_eq!(
+            inherited_items(&request.input),
+            expected_request_history,
+            "phase {phase}"
+        );
+        assert_eq!(
+            inherited_tool_content(&request.input),
+            inherited_tool_content(&expected_request_history)
+        );
+        assert_eq!(
+            loaded
+                .session
+                .clone_history()
+                .await
+                .raw_items()
+                .cloned()
+                .collect::<Vec<_>>(),
+            raw_before
+        );
+        for (unaffected, history, tool_content) in [
+            (&parent, &parent_history, Some(original.clone())),
+            (&sibling, &sibling_history, None),
+        ] {
+            let snapshot = unaffected.config_snapshot().await;
+            assert_eq!(snapshot.model, "gpt-6.1-sol", "phase {phase}");
+            assert_eq!(
+                snapshot.model_provider_id, harness.config.model_provider_id,
+                "phase {phase}"
+            );
+            assert_eq!(
+                snapshot.model_executor,
+                ModelExecutor::Codex,
+                "phase {phase}"
+            );
+            assert_eq!(
+                unaffected.session.new_default_turn().await.provider.info(),
+                &harness.config.model_provider
+            );
+            assert_eq!(
+                unaffected
+                    .session
+                    .clone_history()
+                    .await
+                    .raw_items()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                *history,
+                "phase {phase}"
+            );
+            let request = provider_history_request(unaffected).await;
+            assert_eq!(request.model, "gpt-6.1-sol", "phase {phase}");
+            assert_eq!(inherited_tool_content(&request.input), tool_content);
+        }
+    }
+    let ops = harness.manager.captured_ops();
+    let followups: Vec<_> = ops
+        .iter()
+        .filter_map(|(id, op)| match op {
+            Op::InterAgentCommunication {
+                communication,
+                start_options,
+            } if *id == child_id => {
+                assert!(start_options.turn_trigger.is_none());
+                assert!(start_options.final_output_json_schema.is_none());
+                assert!(start_options.service_tier.is_none());
+                assert!(start_options.parent_turn_id.is_none());
+                assert!(start_options.initiating_agent_path.is_none());
+                assert!(start_options.root_turn_id.is_none());
+                assert!(start_options.cyber_access_program.is_none());
+                Some(communication.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        followups,
+        followup_messages
+            .map(|message| InterAgentCommunication::new(
+                AgentPath::root(),
+                AgentPath::root().join("worker").unwrap(),
+                Vec::new(),
+                format!("Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\n{message}"),
+                true,
+            ))
+            .to_vec()
+    );
+    assert!(
+        ops.iter()
+            .any(|(id, op)| *id == child_id && matches!(op, Op::Interrupt))
+    );
 }

@@ -601,6 +601,10 @@ impl InMemoryThreadStore {
             source: params.source.clone(),
             thread_source: params.thread_source.clone(),
             model_provider: Some(params.metadata.model_provider.clone()),
+            model_executor: params
+                .extra_config
+                .as_ref()
+                .and_then(|extra| extra.model_executor),
             base_instructions: Some(params.base_instructions.clone()),
             dynamic_tools: (!params.dynamic_tools.is_empty()).then(|| params.dynamic_tools.clone()),
             selected_capability_roots: params.selected_capability_roots.clone(),

@@ -33,6 +33,7 @@ fn settings_item(
                 disabled_plugin_ids: Vec::new(),
                 model: "gpt-5".to_string(),
                 model_provider_id: "openai".to_string(),
+                model_executor: None,
                 service_tier: None,
                 approval_policy,
                 approvals_reviewer,

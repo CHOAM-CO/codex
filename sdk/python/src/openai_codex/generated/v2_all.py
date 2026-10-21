@@ -1432,6 +1432,57 @@ class ExternalAgentImportedConnectorSource(RootModel[Literal["remoteMcpServersCo
     root: Literal["remoteMcpServersConfig"]
 
 
+class TextDeltaExternalExecutorEvent(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    delta: str
+    type: Annotated[Literal["textDelta"], Field(title="TextDeltaExternalExecutorEventType")]
+
+
+class ToolExternalExecutorEvent(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    arguments: Any
+    call_id: Annotated[str, Field(alias="callId")]
+    name: str
+    output: Any
+    type: Annotated[Literal["tool"], Field(title="ToolExternalExecutorEventType")]
+
+
+class ExternalExecutorEvent(RootModel[TextDeltaExternalExecutorEvent | ToolExternalExecutorEvent]):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    root: TextDeltaExternalExecutorEvent | ToolExternalExecutorEvent
+
+
+class ExternalExecutorEventParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    event: ExternalExecutorEvent
+    run_id: Annotated[str, Field(alias="runId")]
+    thread_id: Annotated[str, Field(alias="threadId")]
+    turn_id: Annotated[str, Field(alias="turnId")]
+
+
+class ExternalExecutorEventResponse(BaseModel):
+    pass
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+
+
+class ExternalExecutorRunResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    error: str | None = None
+    success: bool
+
+
 class FeedbackRequirements(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -2782,6 +2833,11 @@ class ModelAvailabilityNux(BaseModel):
     message: str
 
 
+class ModelExecutor(Enum):
+    codex = "codex"
+    antigravity = "antigravity"
+
+
 class ModelListParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -2919,6 +2975,35 @@ class MultiAgentVersion(Enum):
     disabled = "disabled"
     v1 = "v1"
     v2 = "v2"
+
+
+class NativeToolCallParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    arguments: Any
+    call_id: Annotated[str, Field(alias="callId")]
+    name: str
+    namespace: str | None = None
+    run_id: Annotated[str, Field(alias="runId")]
+    thread_id: Annotated[str, Field(alias="threadId")]
+    turn_id: Annotated[str, Field(alias="turnId")]
+
+
+class NativeToolListParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    run_id: Annotated[str, Field(alias="runId")]
+    thread_id: Annotated[str, Field(alias="threadId")]
+    turn_id: Annotated[str, Field(alias="turnId")]
+
+
+class NativeToolListResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    tools: list
 
 
 class NetworkAccess(Enum):
@@ -6976,6 +7061,35 @@ class InitializeRequest(BaseModel):
     params: InitializeParams
 
 
+class ThreadToolListRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[Literal["thread/tool/list"], Field(title="Thread/tool/listRequestMethod")]
+    params: NativeToolListParams
+
+
+class ThreadToolCallRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[Literal["thread/tool/call"], Field(title="Thread/tool/callRequestMethod")]
+    params: NativeToolCallParams
+
+
+class TurnExternalEventRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[
+        Literal["turn/external/event"], Field(title="Turn/external/eventRequestMethod")
+    ]
+    params: ExternalExecutorEventParams
+
+
 class ThreadResumeRequest(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -10440,6 +10554,12 @@ class ThreadSettings(BaseModel):
     ] = []
     effort: ReasoningEffort | None = None
     model: str
+    model_executor: Annotated[
+        ModelExecutor | None,
+        Field(
+            alias="modelExecutor", description="Executor selected by the live thread configuration."
+        ),
+    ] = "codex"
     model_provider: Annotated[str, Field(alias="modelProvider")]
     personality: Annotated[
         Personality | None,
@@ -12049,6 +12169,22 @@ class ExternalAgentConfigImportParams(BaseModel):
     ] = None
 
 
+class ExternalExecutorRunParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    cwd: str
+    effort: str | None = None
+    executor: ModelExecutor
+    full_history: Annotated[bool, Field(alias="fullHistory")]
+    input: list[ResponseItem]
+    instructions: str
+    model: str
+    run_id: Annotated[str, Field(alias="runId")]
+    thread_id: Annotated[str, Field(alias="threadId")]
+    turn_id: Annotated[str, Field(alias="turnId")]
+
+
 class ItemCompletedNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -12079,6 +12215,14 @@ class ItemStartedNotification(BaseModel):
     ]
     thread_id: Annotated[str, Field(alias="threadId")]
     turn_id: Annotated[str, Field(alias="turnId")]
+
+
+class NativeToolCallResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    is_error: Annotated[bool, Field(alias="isError")]
+    output: ResponseItem
 
 
 class PluginDetail(BaseModel):
@@ -12431,6 +12575,12 @@ class ThreadForkResponse(BaseModel):
         ),
     ] = []
     model: str
+    model_executor: Annotated[
+        ModelExecutor | None,
+        Field(
+            alias="modelExecutor", description="Executor selected by the live thread configuration."
+        ),
+    ] = "codex"
     model_provider: Annotated[str, Field(alias="modelProvider")]
     reasoning_effort: Annotated[ReasoningEffort | None, Field(alias="reasoningEffort")] = None
     sandbox: Annotated[
@@ -12520,6 +12670,12 @@ class ThreadResumeResponse(BaseModel):
         ),
     ] = None
     model: str
+    model_executor: Annotated[
+        ModelExecutor | None,
+        Field(
+            alias="modelExecutor", description="Executor selected by the live thread configuration."
+        ),
+    ] = "codex"
     model_provider: Annotated[str, Field(alias="modelProvider")]
     reasoning_effort: Annotated[ReasoningEffort | None, Field(alias="reasoningEffort")] = None
     sandbox: Annotated[
@@ -12601,6 +12757,12 @@ class ThreadStartResponse(BaseModel):
         ),
     ] = []
     model: str
+    model_executor: Annotated[
+        ModelExecutor | None,
+        Field(
+            alias="modelExecutor", description="Executor selected by the live thread configuration."
+        ),
+    ] = "codex"
     model_provider: Annotated[str, Field(alias="modelProvider")]
     reasoning_effort: Annotated[ReasoningEffort | None, Field(alias="reasoningEffort")] = None
     sandbox: Annotated[
@@ -12786,6 +12948,9 @@ class ClientRequest(
     RootModel[
         InitializeRequest
         | ThreadStartRequest
+        | ThreadToolListRequest
+        | ThreadToolCallRequest
+        | TurnExternalEventRequest
         | ThreadResumeRequest
         | ThreadForkRequest
         | ThreadArchiveRequest
@@ -12897,6 +13062,9 @@ class ClientRequest(
     root: Annotated[
         InitializeRequest
         | ThreadStartRequest
+        | ThreadToolListRequest
+        | ThreadToolCallRequest
+        | TurnExternalEventRequest
         | ThreadResumeRequest
         | ThreadForkRequest
         | ThreadArchiveRequest

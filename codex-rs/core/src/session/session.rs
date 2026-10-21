@@ -279,6 +279,7 @@ impl SessionConfiguration {
         ThreadConfigSnapshot {
             model: self.step_settings.collaboration_mode.model().to_string(),
             model_provider_id: self.original_config_do_not_use.model_provider_id.clone(),
+            model_executor: self.original_config_do_not_use.model_executor,
             service_tier: self.step_settings.service_tier.clone(),
             approval_policy: self.step_settings.approval_policy.value(),
             approvals_reviewer: self.step_settings.approvals_reviewer,
@@ -321,6 +322,7 @@ impl SessionConfiguration {
         ThreadSettingsSnapshot {
             model: self.step_settings.collaboration_mode.model().to_string(),
             model_provider_id: self.original_config_do_not_use.model_provider_id.clone(),
+            model_executor: Some(self.original_config_do_not_use.model_executor),
             service_tier: self.step_settings.service_tier.clone(),
             approval_policy: self.step_settings.approval_policy.value(),
             approvals_reviewer: self.step_settings.approvals_reviewer,
@@ -1053,7 +1055,9 @@ impl Session {
                             creator_account_id: auth.as_ref().and_then(CodexAuth::get_account_id),
                             session_id,
                             thread_id,
-                            extra_config: config.extra_config.clone(),
+                            extra_config: Some(codex_thread_store::ExtraConfig {
+                                model_executor: Some(config.model_executor),
+                            }),
                             forked_from_id,
                             parent_thread_id,
                             source: session_source,
@@ -1881,6 +1885,7 @@ impl Session {
                     thread_name: session_configuration.thread_name.clone(),
                     model: thread_config.model,
                     model_provider_id: thread_config.model_provider_id,
+                    model_executor: thread_config.model_executor,
                     service_tier: thread_config.service_tier,
                     approval_policy: thread_config.approval_policy,
                     approvals_reviewer: thread_config.approvals_reviewer,

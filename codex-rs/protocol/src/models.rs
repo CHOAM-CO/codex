@@ -1074,6 +1074,8 @@ pub enum ResponseItem {
         #[serde(default, skip_serializing_if = "should_serialize_reasoning_content")]
         #[ts(optional)]
         content: Option<Vec<ReasoningItemContent>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         encrypted_content: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
@@ -2412,11 +2414,20 @@ impl CallToolResult {
     }
 
     pub fn as_function_call_output_payload(&self) -> FunctionCallOutputPayload {
-        let content_items = convert_mcp_content_to_items(&self.content);
+        let mut content_items = convert_mcp_content_to_items(&self.content);
         if content_items
             .iter()
             .any(|item| matches!(item, FunctionCallOutputContentItem::EncryptedContent { .. }))
         {
+            // Preserve the tool's separately supplied structured sibling for providers
+            // that cannot read ciphertext. It is not asserted to be an equivalent copy.
+            if let Some(structured_content) = &self.structured_content
+                && !structured_content.is_null()
+            {
+                content_items.push(FunctionCallOutputContentItem::InputText {
+                    text: format!("Tool-provided structured content (may not replace encrypted content): {structured_content}"),
+                });
+            }
             return FunctionCallOutputPayload {
                 body: FunctionCallOutputBody::ContentItems(content_items),
                 success: Some(self.success()),
@@ -3546,6 +3557,27 @@ mod tests {
                 success: Some(true),
             }
         );
+    }
+
+    #[test]
+    fn encrypted_mcp_output_preserves_structured_sibling_for_provider_switch() {
+        let result = CallToolResult {
+            content: vec![
+                serde_json::json!({"type":"text", "text":"opaque", "_meta":{"codex/encryptedContent":true}}),
+            ],
+            structured_content: Some(serde_json::json!({"count":3})),
+            is_error: Some(false),
+            meta: None,
+        };
+        let payload = result.as_function_call_output_payload();
+        let items = payload.content_items().unwrap();
+        assert!(
+            matches!(&items[0], FunctionCallOutputContentItem::EncryptedContent { encrypted_content } if encrypted_content == "opaque")
+        );
+        assert_eq!(items[1], FunctionCallOutputContentItem::InputText {
+            text: "Tool-provided structured content (may not replace encrypted content): {\"count\":3}".into(),
+        });
+        assert_eq!(payload.success, Some(true));
     }
 
     #[test]

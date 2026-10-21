@@ -670,6 +670,9 @@ pub struct Config {
     /// Info needed to make an API request to the model.
     pub model_provider: ModelProviderInfo,
 
+    /// Backend responsible for model generation.
+    pub model_executor: codex_protocol::external_executor::ModelExecutor,
+
     /// Deprecated: `friendly` and `pragmatic` no longer select a style.
     pub personality: Option<Personality>,
 
@@ -965,6 +968,11 @@ pub struct Config {
 
     /// Default model for spawned subagents when the spawn call does not select one.
     pub agent_default_subagent_model: Option<String>,
+
+    /// Provider ID paired with the default subagent model.
+    pub agent_default_subagent_model_provider: Option<String>,
+
+    pub agent_default_subagent_executor: Option<codex_protocol::external_executor::ModelExecutor>,
 
     /// Default reasoning effort for spawned subagents when the spawn call does not select one.
     pub agent_default_subagent_reasoning_effort: Option<ReasoningEffort>,
@@ -4015,6 +4023,14 @@ impl Config {
             .agents
             .as_ref()
             .and_then(|agents| agents.default_subagent_model.clone());
+        let agent_default_subagent_model_provider = cfg
+            .agents
+            .as_ref()
+            .and_then(|agents| agents.default_subagent_model_provider.clone());
+        let agent_default_subagent_executor = cfg
+            .agents
+            .as_ref()
+            .and_then(|agents| agents.default_subagent_executor);
         let agent_default_subagent_reasoning_effort = cfg
             .agents
             .as_ref()
@@ -4421,6 +4437,7 @@ impl Config {
             async_compaction_threshold_percent,
             model_provider_id,
             model_provider,
+            model_executor: cfg.model_executor.unwrap_or_default(),
             cwd: resolved_cwd,
             workspace_roots: workspace_roots.clone(),
             workspace_roots_explicit,
@@ -4498,6 +4515,8 @@ impl Config {
             agents_enabled,
             agent_max_threads,
             agent_default_subagent_model,
+            agent_default_subagent_model_provider,
+            agent_default_subagent_executor,
             agent_default_subagent_reasoning_effort,
             agent_max_depth,
             agent_roles,

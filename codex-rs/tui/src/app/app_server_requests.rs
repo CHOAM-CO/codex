@@ -209,6 +209,12 @@ impl PendingAppServerRequests {
                     message: "External current time is not available in TUI.".to_string(),
                 })
             }
+            ServerRequest::ExternalExecutorRun { request_id, .. } => {
+                Some(UnsupportedAppServerRequest {
+                    request_id: request_id.clone(),
+                    message: "External model execution requires a client with an external executor adapter.".to_string(),
+                })
+            }
             ServerRequest::ApplyPatchApproval { request_id, .. } => {
                 Some(UnsupportedAppServerRequest {
                     request_id: request_id.clone(),
@@ -531,6 +537,7 @@ impl PendingAppServerRequests {
             ServerRequest::DynamicToolCall { .. }
             | ServerRequest::AttestationGenerate { .. }
             | ServerRequest::CurrentTimeRead { .. }
+            | ServerRequest::ExternalExecutorRun { .. }
             | ServerRequest::ApplyPatchApproval { .. }
             | ServerRequest::ExecCommandApproval { .. } => None,
         }
@@ -1014,6 +1021,29 @@ mod tests {
             }),
             None
         );
+    }
+
+    #[test]
+    fn external_executor_request_is_rejected_instead_of_left_pending() {
+        let mut pending = PendingAppServerRequests::default();
+        let request: ServerRequest = serde_json::from_value(json!({
+            "id":101, "method":"turn/external/run", "params":{
+                "threadId":"thread-1", "turnId":"turn-1", "executor":"antigravity",
+                "model":"external-model", "cwd":"/workspace", "instructions":"",
+                "effort":null, "input":[], "fullHistory":true
+            }
+        }))
+        .expect("external request");
+        assert_eq!(
+            pending.note_server_request(&request),
+            Some(UnsupportedAppServerRequest {
+                request_id: AppServerRequestId::Integer(101),
+                message:
+                    "External model execution requires a client with an external executor adapter."
+                        .to_owned(),
+            })
+        );
+        assert!(pending.pending_request(&request).is_none());
     }
 
     #[test]

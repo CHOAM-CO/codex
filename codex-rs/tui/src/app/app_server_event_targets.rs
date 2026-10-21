@@ -27,6 +27,9 @@ pub(super) fn server_request_thread_id(request: &ServerRequest) -> Option<Thread
         ServerRequest::CurrentTimeRead { params, .. } => {
             ThreadId::from_string(&params.thread_id).ok()
         }
+        ServerRequest::ExternalExecutorRun { params, .. } => {
+            ThreadId::from_string(&params.thread_id).ok()
+        }
         ServerRequest::ChatgptAuthTokensRefresh { .. }
         | ServerRequest::AttestationGenerate { .. }
         | ServerRequest::ApplyPatchApproval { .. }
@@ -258,6 +261,7 @@ mod tests {
 
     fn test_thread_settings() -> ThreadSettings {
         ThreadSettings {
+            model_executor: Default::default(),
             disabled_plugin_ids: Vec::new(),
             cwd: test_path_buf("/tmp/thread-settings").abs(),
             approval_policy: codex_app_server_protocol::AskForApproval::Never,

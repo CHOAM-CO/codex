@@ -735,6 +735,8 @@ fn collab_tools_enabled(turn_context: &TurnContext, model_info: &ModelInfo) -> b
         MultiAgentVersion::V2 => {
             !turn_context.config.multi_agent_v2.disable_native_tools
                 && (turn_context.session_source.get_agent_path().is_none()
+                    || turn_context.config.model_executor
+                        == codex_protocol::external_executor::ModelExecutor::Antigravity
                     || model_info.multi_agent_version == Some(MultiAgentVersion::V2))
         }
     }
@@ -1481,6 +1483,12 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                     SpawnAgentHandlerV2::new(
                         SpawnAgentToolOptions {
                             available_models: turn_context.available_models.clone(),
+                            available_model_providers: turn_context
+                                .config
+                                .model_providers
+                                .keys()
+                                .cloned()
+                                .collect(),
                             multi_agent_version: turn_context.multi_agent_version,
                             model_catalog_in_context: turn_context
                                 .config
@@ -1569,6 +1577,12 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
             registry.add_with_exposure(
                 SpawnAgentHandler::new(SpawnAgentToolOptions {
                     available_models: turn_context.available_models.clone(),
+                    available_model_providers: turn_context
+                        .config
+                        .model_providers
+                        .keys()
+                        .cloned()
+                        .collect(),
                     multi_agent_version: turn_context.multi_agent_version,
                     model_catalog_in_context: turn_context
                         .config

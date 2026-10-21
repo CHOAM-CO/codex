@@ -425,6 +425,7 @@ pub(crate) struct ThreadManagerState {
     agent_control_factory: Option<AgentControlFactory>,
     auth_manager: Arc<AuthManager>,
     models_manager: SharedModelsManager,
+    models_provider: ModelProviderInfo,
     git_root_discovery: Arc<GitRootDiscovery>,
     environment_manager: Arc<EnvironmentManager>,
     starting_mcp_runtimes: std::sync::Mutex<Vec<std::sync::Weak<AtomicBool>>>,
@@ -590,6 +591,7 @@ impl ThreadManager {
                 thread_id_generator: default_thread_id_generator(),
                 agent_control_factory: None,
                 models_manager,
+                models_provider: config.model_provider.clone(),
                 git_root_discovery: Arc::default(),
                 environment_manager,
                 starting_mcp_runtimes: std::sync::Mutex::new(Vec::new()),
@@ -777,6 +779,7 @@ impl ThreadManager {
                 thread_created_tx,
                 thread_id_generator: default_thread_id_generator(),
                 agent_control_factory: None,
+                models_provider: provider.clone(),
                 models_manager: create_model_provider(provider, Some(auth_manager.clone()))
                     .models_manager(codex_home, /*config_model_catalog*/ None),
                 git_root_discovery: Arc::default(),
@@ -2158,6 +2161,16 @@ impl ThreadManagerState {
                     &config.workspace_roots,
                 )
             });
+        if !session_source.is_non_root_agent()
+            && config
+                .config_layer_stack
+                .effective_config()
+                .get("model_executor")
+                .is_none()
+            && let Some(executor) = initial_history.get_model_executor()
+        {
+            config.model_executor = executor;
+        }
         let is_resumed_thread = matches!(&initial_history, InitialHistory::Resumed(_));
         if reserved_thread_id.is_some() && matches!(&initial_history, InitialHistory::Resumed(_)) {
             return Err(CodexErr::InvalidRequest(
@@ -2323,6 +2336,11 @@ impl ThreadManagerState {
         };
         let attachment_source =
             forked_from_thread_id.filter(|_| matches!(&initial_history, InitialHistory::Forked(_)));
+        let models_manager = if config.model_provider == self.models_provider {
+            Arc::clone(&self.models_manager)
+        } else {
+            build_models_manager(&config, Arc::clone(&auth_manager))
+        };
         let spawn_result = Session::spawn(SessionSpawnArgs {
             startup,
             config,
@@ -2330,7 +2348,7 @@ impl ThreadManagerState {
             instructions,
             installation_id: self.installation_id.clone(),
             auth_manager,
-            models_manager: Arc::clone(&self.models_manager),
+            models_manager,
             git_root_discovery: Arc::clone(&self.git_root_discovery),
             environment_manager: Arc::clone(&self.environment_manager),
             skills_service: Arc::clone(&self.skills_service),

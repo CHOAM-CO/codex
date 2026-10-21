@@ -575,6 +575,7 @@ async fn backfill_scans_existing_rollouts() -> Result<()> {
                     agent_nickname: None,
                     agent_role: None,
                     model_provider: None,
+                    model_executor: None,
                     base_instructions: None,
                     dynamic_tools: None,
                     selected_capability_roots: Vec::new(),

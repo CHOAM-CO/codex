@@ -115,6 +115,7 @@ pub enum RolloutRecorderParams {
         selected_capability_roots: Vec<SelectedCapabilityRoot>,
         runtime_workspace_roots: Option<Vec<PathBuf>>,
         multi_agent_version: Option<MultiAgentVersion>,
+        model_executor: Option<codex_protocol::external_executor::ModelExecutor>,
         history_mode: ThreadHistoryMode,
         history_base: Option<HistoryPosition>,
         subagent_history_start_ordinal: Option<u64>,
@@ -221,6 +222,7 @@ impl RolloutRecorderParams {
             selected_capability_roots: Vec::new(),
             runtime_workspace_roots: None,
             multi_agent_version: None,
+            model_executor: None,
             history_mode: Default::default(),
             history_base: None,
             subagent_history_start_ordinal: None,
@@ -287,6 +289,16 @@ impl RolloutRecorderParams {
         } = &mut self
         {
             *roots = runtime_workspace_roots;
+        }
+        self
+    }
+
+    pub fn with_model_executor(
+        mut self,
+        executor: Option<codex_protocol::external_executor::ModelExecutor>,
+    ) -> Self {
+        if let Self::Create { model_executor, .. } = &mut self {
+            *model_executor = executor;
         }
         self
     }
@@ -927,6 +939,7 @@ impl RolloutRecorder {
                 selected_capability_roots,
                 runtime_workspace_roots,
                 multi_agent_version,
+                model_executor,
                 history_mode,
                 history_base,
                 subagent_history_start_ordinal,
@@ -965,6 +978,7 @@ impl RolloutRecorder {
                     source: *source,
                     thread_source,
                     model_provider: Some(config.model_provider_id().to_string()),
+                    model_executor,
                     base_instructions: Some(base_instructions),
                     dynamic_tools: if dynamic_tools.is_empty() {
                         None

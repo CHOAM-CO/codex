@@ -719,6 +719,8 @@ mod tests {
         assert_eq!(
             provider.capabilities(),
             ProviderCapabilities {
+                encrypted_content: true,
+                agent_messages: true,
                 remote_compaction: RemoteCompactionSupport::V2,
                 ..ProviderCapabilities::default()
             }

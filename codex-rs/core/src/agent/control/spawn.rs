@@ -452,9 +452,16 @@ impl LocalAgentControl {
                 })?;
         }
         config.service_tier = self.root_service_tier();
-        if let Some(model) = stored_model {
-            config.model = Some(model);
-        }
+        // Older upstream children are native. Never inherit the current parent's
+        // executor when reloading an independently configured child.
+        config.model_executor = initial_history.get_model_executor().unwrap_or_default();
+        config.model = Some(
+            crate::agent::child_config::saved_agent_model(
+                stored_model.as_deref(),
+                &initial_history,
+            )
+            .map_err(CodexErr::InvalidRequest)?,
+        );
         if config.model_provider_id != stored_model_provider {
             config.model_provider = config
                 .model_providers
@@ -1417,7 +1424,7 @@ impl LocalAgentControl {
 
     async fn resume_single_agent_from_rollout(
         &self,
-        config: Config,
+        mut config: Config,
         thread_id: ThreadId,
         session_source: SessionSource,
     ) -> CodexResult<(ThreadId, MultiAgentVersion)> {
@@ -1446,6 +1453,38 @@ impl LocalAgentControl {
             history: Arc::new(history.items),
             rollout_path: stored_thread.rollout_path,
         });
+        config.model_executor = initial_history.get_model_executor().unwrap_or_default();
+        if session_source.is_non_root_agent()
+            || stored_thread.parent_thread_id.is_some()
+            || stored_thread.source.is_non_root_agent()
+        {
+            config.model = Some(
+                crate::agent::child_config::saved_agent_model(
+                    stored_thread.model.as_deref(),
+                    &initial_history,
+                )
+                .map_err(CodexErr::InvalidRequest)?,
+            );
+        } else if let Some(model) = stored_thread
+            .model
+            .or_else(|| initial_history.get_saved_model().map(str::to_owned))
+        {
+            config.model = Some(model);
+        }
+        config.model_reasoning_effort = stored_thread.reasoning_effort;
+        if config.model_provider_id != stored_thread.model_provider {
+            config.model_provider = config
+                .model_providers
+                .get(&stored_thread.model_provider)
+                .cloned()
+                .ok_or_else(|| {
+                    CodexErr::InvalidRequest(format!(
+                        "Model provider `{}` not found",
+                        stored_thread.model_provider
+                    ))
+                })?;
+            config.model_provider_id = stored_thread.model_provider;
+        }
         let parent_thread_id = stored_thread.parent_thread_id;
         let multi_agent_version = state
             .effective_multi_agent_version_for_spawn(

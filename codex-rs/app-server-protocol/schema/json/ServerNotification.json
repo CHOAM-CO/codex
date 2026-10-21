@@ -3096,6 +3096,13 @@
       ],
       "type": "string"
     },
+    "ModelExecutor": {
+      "enum": [
+        "codex",
+        "antigravity"
+      ],
+      "type": "string"
+    },
     "ModelRerouteReason": {
       "enum": [
         "highRiskCyberActivity"
@@ -6155,6 +6162,15 @@
         },
         "model": {
           "type": "string"
+        },
+        "modelExecutor": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ModelExecutor"
+            }
+          ],
+          "default": "codex",
+          "description": "Executor selected by the live thread configuration."
         },
         "modelProvider": {
           "type": "string"

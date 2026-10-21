@@ -71,7 +71,14 @@ const SPECIAL_DEFINITIONS: &[&str] = &[
     "ServerNotification",
     "ServerRequest",
 ];
-const FLAT_V2_SHARED_DEFINITIONS: &[&str] = &["ClientRequest", "ServerNotification"];
+const FLAT_V2_SHARED_DEFINITIONS: &[&str] = &[
+    "ClientRequest",
+    "ServerNotification",
+    // These client-owned execution callbacks are root server-request types. Keep
+    // both sides in the flat bundle consumed by the Python SDK generator.
+    "ExternalExecutorRunParams",
+    "ExternalExecutorRunResponse",
+];
 const V1_CLIENT_REQUEST_METHODS: &[&str] =
     &["getConversationSummary", "gitDiffToRemote", "getAuthStatus"];
 const EXCLUDED_SERVER_NOTIFICATION_METHODS_FOR_JSON: &[&str] =
@@ -2573,6 +2580,35 @@ mod tests {
             serde_json::json!("#/definitions/v2/UserInput")
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn flat_v2_export_includes_external_executor_callback_contract() -> Result<()> {
+        let output = tempfile::tempdir()?;
+        generate_json(output.path())?;
+        let bundle = read_json_value(
+            &output
+                .path()
+                .join("codex_app_server_protocol.v2.schemas.json"),
+        )?;
+        let definitions = &bundle["definitions"];
+        let params = &definitions["ExternalExecutorRunParams"];
+        assert_eq!(params["properties"]["fullHistory"]["type"], "boolean");
+        assert_eq!(params["properties"]["threadId"]["type"], "string");
+        assert_eq!(params["properties"]["runId"]["type"], "string");
+        assert!(
+            params["required"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("runId"))
+        );
+        assert_eq!(params["properties"]["input"]["type"], "array");
+        assert_eq!(
+            definitions["ExternalExecutorRunResponse"]["properties"]["success"]["type"],
+            "boolean"
+        );
+        ensure_referenced_definitions_present(&bundle, "external executor flat v2")?;
         Ok(())
     }
 

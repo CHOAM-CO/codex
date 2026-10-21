@@ -26,6 +26,7 @@ const MAX_REASONING_EFFORT_CHARS_IN_SPAWN_AGENT_DESCRIPTION: usize = 64;
 #[derive(Debug, Clone)]
 pub struct SpawnAgentToolOptions {
     pub available_models: Vec<ModelPreset>,
+    pub available_model_providers: Vec<String>,
     pub agent_type_description: String,
     pub expose_agent_type: bool,
     pub hide_agent_type_model_reasoning: bool,
@@ -39,6 +40,7 @@ impl Default for SpawnAgentToolOptions {
     fn default() -> Self {
         Self {
             available_models: Vec::new(),
+            available_model_providers: Vec::new(),
             agent_type_description: String::new(),
             expose_agent_type: true,
             hide_agent_type_model_reasoning: false,
@@ -77,7 +79,7 @@ pub fn create_spawn_agent_tool_v1(options: SpawnAgentToolOptions) -> ToolSpec {
         (!options.hide_agent_type_model_reasoning).then_some(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE);
     let return_value_description =
         "Returns the spawned agent id plus the user-facing nickname when available.";
-    let mut properties = spawn_agent_common_properties_v1(&options.agent_type_description);
+    let mut properties = spawn_agent_common_properties_v1(&options);
     if !options.expose_agent_type {
         properties.remove("agent_type");
     }
@@ -122,12 +124,14 @@ pub fn create_spawn_agent_tool_v2(
         (options.expose_spawn_agent_model_overrides && !options.hide_agent_type_model_reasoning)
             .then_some(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE)
     };
-    let mut properties = spawn_agent_common_properties_v2(&options.agent_type_description);
+    let mut properties = spawn_agent_common_properties_v2(&options);
     if !options.expose_agent_type {
         properties.remove("agent_type");
     }
     if !options.expose_spawn_agent_model_overrides {
         properties.remove("model");
+        properties.remove("model_provider");
+        properties.remove("executor");
         properties.remove("reasoning_effort");
     }
     properties.insert(
@@ -607,7 +611,10 @@ fn create_collab_input_items_schema() -> JsonSchema {
         ))
 }
 
-fn spawn_agent_common_properties_v1(agent_type_description: &str) -> BTreeMap<String, JsonSchema> {
+fn spawn_agent_common_properties_v1(
+    options: &SpawnAgentToolOptions,
+) -> BTreeMap<String, JsonSchema> {
+    let agent_type_description = &options.agent_type_description;
     BTreeMap::from([
         (
             "message".to_string(),
@@ -637,6 +644,16 @@ fn spawn_agent_common_properties_v1(agent_type_description: &str) -> BTreeMap<St
             )),
         ),
         (
+            "executor".to_string(),
+            JsonSchema::string(Some(
+                "Execution backend for the child: codex or antigravity. Requires the host to enable and support that backend; omission inherits the parent executor.".to_string(),
+            )),
+        ),
+        (
+            "model_provider".to_string(),
+            JsonSchema::string(Some(spawn_provider_description(options))),
+        ),
+        (
             "reasoning_effort".to_string(),
             JsonSchema::string(Some(
                 "Reasoning effort override for the new agent. Omit to inherit the parent effort."
@@ -646,7 +663,10 @@ fn spawn_agent_common_properties_v1(agent_type_description: &str) -> BTreeMap<St
     ])
 }
 
-fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<String, JsonSchema> {
+fn spawn_agent_common_properties_v2(
+    options: &SpawnAgentToolOptions,
+) -> BTreeMap<String, JsonSchema> {
+    let agent_type_description = &options.agent_type_description;
     BTreeMap::from([
         (
             "message".to_string(),
@@ -674,6 +694,16 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
             )),
         ),
         (
+            "executor".to_string(),
+            JsonSchema::string(Some(
+                "Execution backend for the child: codex or antigravity. Requires the host to enable and support that backend; omission inherits the parent executor.".to_string(),
+            )),
+        ),
+        (
+            "model_provider".to_string(),
+            JsonSchema::string(Some(spawn_provider_description(options))),
+        ),
+        (
             "reasoning_effort".to_string(),
             JsonSchema::string(Some(
                 "Reasoning effort override for the new agent. Omit to inherit the parent effort."
@@ -683,9 +713,20 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
     ])
 }
 
+fn spawn_provider_description(options: &SpawnAgentToolOptions) -> String {
+    let mut providers = options.available_model_providers.clone();
+    providers.sort();
+    format!(
+        "Configured provider ID for the child model. An explicit model without this field uses the parent provider. Role settings take precedence; when model, provider, and executor are all omitted the configured child default applies. Available provider IDs: {}",
+        providers.join(", ")
+    )
+}
+
 fn hide_spawn_agent_metadata_options(properties: &mut BTreeMap<String, JsonSchema>) {
     properties.remove("agent_type");
     properties.remove("model");
+    properties.remove("model_provider");
+    properties.remove("executor");
     properties.remove("reasoning_effort");
 }
 

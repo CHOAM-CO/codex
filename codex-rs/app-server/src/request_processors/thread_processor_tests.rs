@@ -684,6 +684,7 @@ mod thread_processor_behavior_tests {
             initial_turns_page: None,
         };
         let config_snapshot = ThreadConfigSnapshot {
+            model_executor: codex_protocol::external_executor::ModelExecutor::Antigravity,
             turn_extension_init: Default::default(),
             disabled_plugin_ids: Vec::new(),
             model: "gpt-5".to_string(),
@@ -720,6 +721,11 @@ mod thread_processor_behavior_tests {
         assert_eq!(
             collect_resume_override_mismatches(&request, &config_snapshot),
             vec!["service_tier requested=Some(\"priority\") active=Some(\"flex\")".to_string()]
+        );
+        assert_eq!(
+            crate::request_processors::thread_settings_from_config_snapshot(&config_snapshot)
+                .model_executor,
+            codex_protocol::external_executor::ModelExecutor::Antigravity,
         );
     }
 

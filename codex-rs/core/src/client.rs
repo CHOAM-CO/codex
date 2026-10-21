@@ -532,6 +532,10 @@ fn sideband_websocket_auth_headers(api_auth: &dyn AuthProvider) -> ApiHeaderMap 
 }
 
 impl ModelClient {
+    pub(crate) fn provider_info(&self) -> &ModelProviderInfo {
+        self.state.provider.info()
+    }
+
     #[allow(clippy::too_many_arguments)]
     /// Creates a new session-scoped `ModelClient`.
     ///
@@ -1007,22 +1011,27 @@ impl ModelClient {
         if !is_openai {
             for item in &mut input {
                 item.clear_internal_chat_message_metadata_passthrough();
-                if !matches!(
-                    item,
-                    ResponseItem::Reasoning { .. }
-                        | ResponseItem::Compaction { .. }
-                        | ResponseItem::ContextCompaction { .. }
-                ) {
-                    item.clear_encrypted_content();
-                }
-                if let ResponseItem::FunctionCall {
-                    encrypted_function_args,
-                    ..
-                } = item
-                {
-                    *encrypted_function_args = None;
-                }
             }
+        }
+        if !self.state.provider.capabilities().encrypted_content {
+            let compatible = codex_protocol::provider_history::without_encrypted_content(&input);
+            if compatible.unavailable_items != 0 {
+                warn!(
+                    unavailable_items = compatible.unavailable_items,
+                    "The selected provider cannot read parts of encrypted history; request context contains explicit unavailable-content notices"
+                );
+            }
+            input = compatible.items;
+        }
+        if !self.state.provider.capabilities().agent_messages {
+            let compatible = codex_protocol::provider_history::without_agent_message_items(&input);
+            if compatible.unavailable_items != 0 {
+                warn!(
+                    unavailable_items = compatible.unavailable_items,
+                    "The selected provider cannot replay native encrypted agent messages; request context contains explicit unavailable-content notices"
+                );
+            }
+            input = compatible.items;
         }
         let reasoning = self.build_reasoning(model_info, effort, summary);
         let stream_options = (self.state.concurrent_reasoning_summaries_enabled
@@ -1031,8 +1040,15 @@ impl ModelClient {
         .then_some(StreamOptions {
             reasoning_summary_delivery: codex_api::ReasoningSummaryDelivery::SequentialCutoff,
         });
-        let mut include = vec!["reasoning.encrypted_content".to_string()];
-        if self.state.output_token_replay_enabled && is_openai {
+        let mut include = if self.state.provider.capabilities().encrypted_content {
+            vec!["reasoning.encrypted_content".to_string()]
+        } else {
+            Vec::new()
+        };
+        if self.state.output_token_replay_enabled
+            && is_openai
+            && self.state.provider.capabilities().encrypted_content
+        {
             include.push("output.encrypted_content".to_string());
         }
         let verbosity = if model_info.support_verbosity {

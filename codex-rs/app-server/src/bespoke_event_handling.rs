@@ -974,6 +974,36 @@ pub(crate) async fn apply_bespoke_event_handling(
                 on_request_permissions_response(pending_response, conversation, thread_state).await;
             });
         }
+        EventMsg::ExternalExecutorRequest(params) => {
+            let turn_id = params.turn_id.clone();
+            let run_id = params.run_id.clone();
+            let (_, receiver) = outgoing
+                .send_request(ServerRequestPayload::ExternalExecutorRun(params))
+                .await;
+            tokio::spawn(async move {
+                let result = match receiver.await {
+                    Ok(Ok(value)) => serde_json::from_value(value).unwrap_or_else(|err| {
+                        codex_protocol::external_executor::ExternalExecutorRunResponse {
+                            success: false,
+                            error: Some(format!("invalid external executor result: {err}")),
+                        }
+                    }),
+                    Ok(Err(err)) => {
+                        codex_protocol::external_executor::ExternalExecutorRunResponse {
+                            success: false,
+                            error: Some(format!("external executor request failed: {err:?}")),
+                        }
+                    }
+                    Err(err) => codex_protocol::external_executor::ExternalExecutorRunResponse {
+                        success: false,
+                        error: Some(format!("external executor disconnected: {err}")),
+                    },
+                };
+                let _ = conversation
+                    .external_executor_complete(&turn_id, &run_id, result)
+                    .await;
+            });
+        }
         EventMsg::DynamicToolCallRequest(_)
         | EventMsg::DynamicToolCallResponse(_)
         | EventMsg::CollabAgentSpawnBegin(_)

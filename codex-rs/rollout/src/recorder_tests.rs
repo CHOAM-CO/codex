@@ -207,6 +207,7 @@ async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
             agent_nickname: None,
             agent_role: None,
             model_provider: None,
+            model_executor: None,
             base_instructions: None,
             dynamic_tools: None,
             selected_capability_roots: Vec::new(),
@@ -1960,5 +1961,41 @@ async fn resume_candidate_matches_cwd_reads_latest_turn_context() -> std::io::Re
         )
         .await
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn recorder_preserves_executor_for_both_history_modes() -> std::io::Result<()> {
+    use codex_protocol::external_executor::ModelExecutor;
+    for mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
+        let home = TempDir::new()?;
+        let config = test_config(home.path());
+        let recorder = RolloutRecorder::new(
+            &config,
+            RolloutRecorderParams::new(
+                ThreadId::new(),
+                None,
+                None,
+                SessionSource::Exec,
+                None,
+                "test_originator".into(),
+                BaseInstructions::default(),
+                Vec::new(),
+            )
+            .with_history_mode(mode)
+            .with_model_executor(Some(ModelExecutor::Antigravity)),
+        )
+        .await?;
+        recorder.persist().await?;
+        recorder.flush().await?;
+        let (items, _, errors) =
+            RolloutRecorder::load_rollout_items(recorder.rollout_path()).await?;
+        assert_eq!(errors, 0);
+        let RolloutItem::SessionMeta(meta) = &items[0] else {
+            panic!("missing session metadata")
+        };
+        assert_eq!(meta.meta.model_executor, Some(ModelExecutor::Antigravity));
+        recorder.shutdown().await?;
+    }
     Ok(())
 }

@@ -66,8 +66,11 @@ pub struct ThreadPersistenceMetadata {
 }
 
 /// Extra configuration fields for a thread.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExtraConfig {}
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtraConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_executor: Option<codex_protocol::external_executor::ModelExecutor>,
+}
 
 /// Parameters required to create a persisted thread.
 #[derive(Clone, Debug, Serialize, Deserialize)]

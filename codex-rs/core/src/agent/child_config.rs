@@ -11,12 +11,15 @@ use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
 use codex_features::Feature;
 use codex_models_manager::manager::RefreshStrategy;
+use codex_models_manager::manager::SharedModelsManager;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
+use codex_protocol::external_executor::ModelExecutor;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::protocol::MultiAgentVersion;
+use std::sync::Arc;
 
 pub(crate) const MAX_SPAWN_AGENT_MODEL_OVERRIDES: usize = 5;
 
@@ -40,6 +43,8 @@ pub(crate) struct SpawnConfigOptions<'a> {
     pub(crate) full_history_fork: bool,
     pub(crate) role_name: Option<&'a str>,
     pub(crate) model: Option<&'a str>,
+    pub(crate) model_provider: Option<&'a str>,
+    pub(crate) executor: Option<ModelExecutor>,
     pub(crate) reasoning_effort: Option<ReasoningEffort>,
 }
 
@@ -65,6 +70,8 @@ pub(crate) async fn prepare_agent_spawn_config(
         step_context,
         &mut config,
         options.model,
+        options.model_provider,
+        options.executor,
         options.reasoning_effort,
     )
     .await?;
@@ -98,6 +105,19 @@ pub(crate) async fn prepare_agent_spawn_config(
         })
         .map(str::to_owned);
     Ok(PreparedSpawnConfig { config, role_name })
+}
+
+/// Recovers a child's own selection before any parent runtime settings are applied.
+pub(crate) fn saved_agent_model(
+    stored_model: Option<&str>,
+    history: &codex_history::InitialHistory,
+) -> Result<String, String> {
+    stored_model
+        .or_else(|| history.get_saved_model())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            "The saved child model is unavailable in thread metadata and owned history".to_owned()
+        })
 }
 
 /// Builds the base config snapshot for a newly spawned sub-agent.
@@ -206,40 +226,85 @@ async fn apply_requested_spawn_agent_model_overrides(
     step_context: &StepContext,
     config: &mut Config,
     requested_model: Option<&str>,
+    requested_provider: Option<&str>,
+    requested_executor: Option<ModelExecutor>,
     requested_reasoning_effort: Option<ReasoningEffort>,
 ) -> Result<(), String> {
     let turn = step_context.turn.as_ref();
-    let requested_model = requested_model.or(turn.config.agent_default_subagent_model.as_deref());
+    // Model and provider form one selection. A partial explicit selection inherits the
+    // missing field from the parent, never from an unrelated configured default pair.
+    let use_default =
+        requested_model.is_none() && requested_provider.is_none() && requested_executor.is_none();
+    let requested_model = if use_default {
+        turn.config.agent_default_subagent_model.as_deref()
+    } else {
+        requested_model
+    };
+    let requested_provider = if use_default {
+        turn.config.agent_default_subagent_model_provider.as_deref()
+    } else {
+        requested_provider
+    };
+    let requested_executor = if use_default {
+        turn.config.agent_default_subagent_executor
+    } else {
+        requested_executor
+    };
+    if let Some(executor) = requested_executor {
+        config.model_executor = executor;
+    }
+    if let Some(provider_id) = requested_provider {
+        apply_agent_model_provider(config, provider_id)?;
+    }
     let requested_reasoning_effort = requested_reasoning_effort
         .or_else(|| turn.config.agent_default_subagent_reasoning_effort.clone());
-    if requested_model.is_none() && requested_reasoning_effort.is_none() {
+    if config.model_executor != ModelExecutor::Codex {
+        if let Some(model) = requested_model {
+            config.model = Some(model.to_owned());
+        }
+        if let Some(effort) = requested_reasoning_effort {
+            config.model_reasoning_effort = Some(effort);
+        }
+        return Ok(());
+    }
+    if requested_model.is_none()
+        && requested_provider.is_none()
+        && requested_reasoning_effort.is_none()
+    {
         return Ok(());
     }
 
-    if let Some(requested_model) = requested_model {
-        let available_models = session
-            .services
-            .models_manager
+    if let Some(requested_model) =
+        requested_model.or_else(|| requested_provider.and(config.model.as_deref()))
+    {
+        let models_manager = spawn_agent_models_manager(session, config);
+        let available_models = models_manager
             .list_models(RefreshStrategy::Offline, config.http_client_factory())
             .await;
-        let selected_model_name = find_spawn_agent_model_name(
-            &available_models,
-            requested_model,
-            turn.multi_agent_version,
-        )?;
-        let selected_model_info = session
-            .services
-            .models_manager
+        // Custom providers accept their own model IDs just like the main session.
+        // They are not limited to the OpenAI catalog or substituted with its default.
+        let selected_model_name = if config.model_provider.is_openai() {
+            find_spawn_agent_model_name(
+                &available_models,
+                requested_model,
+                turn.multi_agent_version,
+            )?
+        } else {
+            requested_model.to_owned()
+        };
+        let selected_model_info = models_manager
             .get_model_info(&selected_model_name, &config.to_models_manager_config())
             .await;
 
         config.model = Some(selected_model_name.clone());
         if let Some(reasoning_effort) = requested_reasoning_effort {
-            validate_spawn_agent_reasoning_effort(
-                &selected_model_name,
-                &selected_model_info.supported_reasoning_levels,
-                &reasoning_effort,
-            )?;
+            if !selected_model_info.used_fallback_model_metadata {
+                validate_spawn_agent_reasoning_effort(
+                    &selected_model_name,
+                    &selected_model_info.supported_reasoning_levels,
+                    &reasoning_effort,
+                )?;
+            }
             config.model_reasoning_effort = Some(reasoning_effort);
         } else {
             config.model_reasoning_effort = selected_model_info.default_reasoning_level;
@@ -260,10 +325,50 @@ async fn apply_requested_spawn_agent_model_overrides(
     Ok(())
 }
 
+/// Select a configured provider under the same managed requirement as main-thread startup.
+pub(crate) fn apply_agent_model_provider(
+    config: &mut Config,
+    provider_id: &str,
+) -> Result<(), String> {
+    if let Some(required) = config.config_layer_stack.required_model_provider()
+        && required != provider_id
+    {
+        return Err(format!(
+            "Managed Codex configuration requires model provider `{required}`; requested `{provider_id}`"
+        ));
+    }
+    config.model_provider = config
+        .model_providers
+        .get(provider_id)
+        .cloned()
+        .ok_or_else(|| format!("Model provider `{provider_id}` not found"))?;
+    config.model_provider_id = provider_id.to_owned();
+    Ok(())
+}
+
+/// Reuse the live catalog only for its own provider. Child providers resolve their
+/// metadata with the same native credentials/catalog logic as an independent thread.
+pub(crate) fn spawn_agent_models_manager(
+    session: &Session,
+    config: &Config,
+) -> SharedModelsManager {
+    if session.services.model_client.provider_info() == &config.model_provider {
+        Arc::clone(&session.services.models_manager)
+    } else {
+        crate::thread_manager::build_models_manager(
+            config,
+            Arc::clone(&session.services.auth_manager),
+        )
+    }
+}
+
 pub(crate) async fn apply_spawn_agent_service_tier(
     session: &Session,
     config: &mut Config,
 ) -> Result<(), String> {
+    if config.model_executor != ModelExecutor::Codex {
+        return Ok(());
+    }
     let Some(service_tier) = session.services.agent_control.service_tier() else {
         config.service_tier = None;
         return Ok(());
@@ -276,9 +381,7 @@ pub(crate) async fn apply_spawn_agent_service_tier(
     let model = config.model.clone().ok_or_else(|| {
         "spawn_agent could not resolve the child model for service tier validation".to_string()
     })?;
-    let model_info = session
-        .services
-        .models_manager
+    let model_info = spawn_agent_models_manager(session, config)
         .get_model_info(model.as_str(), &config.to_models_manager_config())
         .await;
 
@@ -294,22 +397,26 @@ async fn apply_spawn_agent_role(
     role_name: Option<&str>,
 ) -> Result<(), String> {
     let previous_model = config.model.clone();
+    let previous_provider = config.model_provider_id.clone();
     let previous_reasoning_effort = config.model_reasoning_effort.clone();
     apply_role_to_config(config, role_name).await?;
-    if config.model == previous_model && config.model_reasoning_effort == previous_reasoning_effort
+    if config.model == previous_model
+        && config.model_provider_id == previous_provider
+        && config.model_reasoning_effort == previous_reasoning_effort
     {
         return Ok(());
     }
 
+    if config.model_executor != ModelExecutor::Codex {
+        return Ok(());
+    }
     let Some(reasoning_effort) = config.model_reasoning_effort.clone() else {
         return Ok(());
     };
     let model = config.model.clone().ok_or_else(|| {
         "spawn_agent could not resolve the child model for reasoning effort validation".to_string()
     })?;
-    let model_info = session
-        .services
-        .models_manager
+    let model_info = spawn_agent_models_manager(session, config)
         .get_model_info(&model, &config.to_models_manager_config())
         .await;
     if model_info.used_fallback_model_metadata {
@@ -371,3 +478,7 @@ fn validate_spawn_agent_reasoning_effort(
         "Reasoning effort `{requested_reasoning_effort}` is not supported for model `{model}`. Supported reasoning efforts: {supported}"
     ))
 }
+
+#[cfg(test)]
+#[path = "child_config_tests.rs"]
+mod tests;

@@ -555,6 +555,21 @@ client_request_definitions! {
         serialization: None,
         response: v2::ThreadStartResponse,
     },
+    NativeToolList => "thread/tool/list" {
+        params: v2::NativeToolListParams,
+        serialization: None,
+        response: v2::NativeToolListResponse,
+    },
+    NativeToolCall => "thread/tool/call" {
+        params: v2::NativeToolCallParams,
+        serialization: None,
+        response: v2::NativeToolCallResponse,
+    },
+    ExternalExecutorEvent => "turn/external/event" {
+        params: v2::ExternalExecutorEventParams,
+        serialization: None,
+        response: v2::ExternalExecutorEventResponse,
+    },
     ThreadResume => "thread/resume" {
         params: v2::ThreadResumeParams,
         inspect_params: true,
@@ -1824,6 +1839,11 @@ server_request_definitions! {
         response: v2::PermissionsRequestApprovalResponse,
     },
 
+    /// Execute an external model with native thread context and tool dispatch.
+    ExternalExecutorRun => "turn/external/run" {
+        params: v2::ExternalExecutorRunParams,
+        response: v2::ExternalExecutorRunResponse,
+    },
     /// Execute a dynamic tool call on the client.
     DynamicToolCall => "item/tool/call" {
         params: v2::DynamicToolCallParams,
@@ -3238,6 +3258,7 @@ mod tests {
         let response = ClientResponse::ThreadStart {
             request_id: RequestId::Integer(7),
             response: v2::ThreadStartResponse {
+                model_executor: Default::default(),
                 disabled_plugin_ids: Vec::new(),
                 thread: v2::Thread {
                     originator: None,
@@ -3337,6 +3358,7 @@ mod tests {
                     },
                     "model": "gpt-5",
                     "modelProvider": "openai",
+                    "modelExecutor": "codex",
                     "serviceTier": null,
                     "disabledPluginIds": [],
                     "cwd": absolute_path_string("tmp"),
@@ -4508,6 +4530,7 @@ mod tests {
             ServerNotification::ThreadSettingsUpdated(v2::ThreadSettingsUpdatedNotification {
                 thread_id: "thr_123".to_string(),
                 thread_settings: v2::ThreadSettings {
+                    model_executor: Default::default(),
                     disabled_plugin_ids: Vec::new(),
                     cwd: absolute_path("/tmp/repo"),
                     approval_policy: v2::AskForApproval::Never,

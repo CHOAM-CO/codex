@@ -80,8 +80,30 @@ impl ToolCallRuntime {
         call: ToolCall,
         cancellation_token: CancellationToken,
     ) -> impl std::future::Future<Output = Result<ResponseItemEnvelope, CodexErr>> {
-        let error_call = call.clone();
         let source = call.direct_source();
+        self.handle_tool_call_from_source(call, cancellation_token, source)
+    }
+
+    pub(crate) fn handle_external_tool_call(
+        self,
+        call: ToolCall,
+        cancellation_token: CancellationToken,
+    ) -> impl std::future::Future<Output = Result<ResponseItemEnvelope, CodexErr>> {
+        // External clients supply plaintext JSON, including collaboration messages.
+        self.handle_tool_call_from_source(
+            call,
+            cancellation_token,
+            ToolCallSource::DirectPlaintextMessage,
+        )
+    }
+
+    fn handle_tool_call_from_source(
+        self,
+        call: ToolCall,
+        cancellation_token: CancellationToken,
+        source: ToolCallSource,
+    ) -> impl std::future::Future<Output = Result<ResponseItemEnvelope, CodexErr>> {
+        let error_call = call.clone();
         let recorder = self.session.services.executed_tool_calls.clone();
         let recorded_call = recorder.prepare_direct_call(&call, &source, &self.step_context);
         let step_context = Arc::clone(&self.step_context);

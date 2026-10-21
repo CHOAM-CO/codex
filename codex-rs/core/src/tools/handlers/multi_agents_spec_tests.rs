@@ -232,7 +232,14 @@ fn spawn_agent_tool_hides_model_controls_without_override_exposure() {
         .as_ref()
         .expect("spawn_agent should use object params");
 
-    for property in ["agent_type", "model", "reasoning_effort", "service_tier"] {
+    for property in [
+        "agent_type",
+        "model",
+        "model_provider",
+        "executor",
+        "reasoning_effort",
+        "service_tier",
+    ] {
         assert!(!properties.contains_key(property));
     }
     assert!(!description.contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE));
@@ -414,4 +421,39 @@ fn list_agents_tool_status_schema_includes_interrupted() {
             "not_found"
         ])
     );
+}
+
+#[test]
+fn both_spawn_tools_expose_configured_provider_and_executor_selection() {
+    let options = SpawnAgentToolOptions {
+        available_model_providers: vec!["strata".into(), "openai".into()],
+        expose_spawn_agent_model_overrides: true,
+        ..Default::default()
+    };
+    let ToolSpec::Function(v2) = create_spawn_agent_tool_v2(options.clone(), None) else {
+        panic!("v2 function");
+    };
+    let ToolSpec::Namespace(v1) = create_spawn_agent_tool_v1(options) else {
+        panic!("v1 namespace");
+    };
+    let Some(ResponsesApiNamespaceTool::Function(v1)) = v1.tools.first() else {
+        panic!("v1 function");
+    };
+    for schema in [&v1.parameters, &v2.parameters] {
+        let properties = schema.properties.as_ref().unwrap();
+        assert_eq!(
+            properties["model_provider"].schema_type,
+            Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::String))
+        );
+        assert_eq!(
+            properties["executor"].schema_type,
+            Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::String))
+        );
+        assert_eq!(
+            properties["model_provider"].description.as_deref(),
+            Some(
+                "Configured provider ID for the child model. An explicit model without this field uses the parent provider. Role settings take precedence; when model, provider, and executor are all omitted the configured child default applies. Available provider IDs: openai, strata"
+            )
+        );
+    }
 }

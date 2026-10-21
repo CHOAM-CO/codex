@@ -289,6 +289,7 @@ fn thread_resume_params_accept_turns_page_bootstrap() {
 #[test]
 fn thread_resume_response_round_trips_initial_turns_page() {
     let response = ThreadResumeResponse {
+        model_executor: ModelExecutor::Antigravity,
         disabled_plugin_ids: Vec::new(),
         thread: Thread {
             originator: Some("future_client".to_string()),
@@ -357,6 +358,18 @@ fn thread_resume_response_round_trips_initial_turns_page() {
     };
 
     let value = serde_json::to_value(&response).expect("serialize thread resume response");
+    assert_eq!(value["modelExecutor"], json!("antigravity"));
+    let mut legacy_response = value.clone();
+    legacy_response
+        .as_object_mut()
+        .unwrap()
+        .remove("modelExecutor");
+    assert_eq!(
+        serde_json::from_value::<ThreadResumeResponse>(legacy_response)
+            .unwrap()
+            .model_executor,
+        ModelExecutor::Codex
+    );
     assert_eq!(value["thread"]["originator"], json!("future_client"));
     assert_eq!(
         value["thread"]["environments"],

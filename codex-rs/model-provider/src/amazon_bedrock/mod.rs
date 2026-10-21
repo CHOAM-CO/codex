@@ -282,6 +282,8 @@ impl ModelProvider for AmazonBedrockModelProvider {
             image_generation: false,
             web_search: self.endpoint == BedrockEndpoint::Mantle,
             external_web_access: false,
+            encrypted_content: true,
+            agent_messages: ProviderCapabilities::from_config(&self.info).agent_messages,
             remote_compaction: RemoteCompactionSupport::V2,
         }
     }
@@ -697,6 +699,8 @@ mod tests {
                 image_generation: false,
                 web_search: true,
                 external_web_access: false,
+                encrypted_content: true,
+                agent_messages: false,
                 remote_compaction: RemoteCompactionSupport::V2,
             }
         );
@@ -715,6 +719,8 @@ mod tests {
                 image_generation: false,
                 web_search: false,
                 external_web_access: false,
+                encrypted_content: true,
+                agent_messages: false,
                 remote_compaction: RemoteCompactionSupport::V2,
             }
         );

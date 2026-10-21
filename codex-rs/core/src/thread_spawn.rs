@@ -9,6 +9,7 @@ use crate::agent::api::SpawnRequest;
 use crate::agent::child_config::SpawnConfigOptions;
 use crate::agent::child_config::SpawnConfigVersion;
 use crate::agent::child_config::prepare_agent_spawn_config;
+use crate::agent::child_config::spawn_agent_models_manager;
 use crate::agent::next_thread_spawn_depth;
 use crate::agent::types::AgentMessage;
 use crate::agent::types::LiveAgent;
@@ -36,6 +37,8 @@ pub(crate) struct ThreadSpawnRequest {
     pub fork_mode: Option<SpawnAgentForkMode>,
     pub agent_type: Option<String>,
     pub model: Option<String>,
+    pub model_provider: Option<String>,
+    pub executor: Option<codex_protocol::external_executor::ModelExecutor>,
     pub reasoning_effort: Option<ReasoningEffort>,
 }
 
@@ -68,6 +71,8 @@ pub(crate) async fn spawn(
         fork_mode,
         agent_type,
         model,
+        model_provider,
+        executor,
         reasoning_effort,
     } = request;
     let message_text = match &message {
@@ -90,6 +95,8 @@ pub(crate) async fn spawn(
             full_history_fork: matches!(fork_mode, Some(SpawnAgentForkMode::FullHistory)),
             role_name,
             model: model.as_deref(),
+            model_provider: model_provider.as_deref(),
+            executor,
             reasoning_effort,
         },
     )
@@ -113,13 +120,16 @@ pub(crate) async fn spawn(
         && turn.multi_agent_version == MultiAgentVersion::V2
     {
         let child_model_info = match config.model.as_deref() {
-            Some(model) if model != turn.model_info().slug => Some(
-                session
-                    .services
-                    .models_manager
-                    .get_model_info(model, &config.to_models_manager_config())
-                    .await,
-            ),
+            Some(model)
+                if model != turn.model_info().slug
+                    || config.model_provider != *turn.provider.info() =>
+            {
+                Some(
+                    spawn_agent_models_manager(session, &config)
+                        .get_model_info(model, &config.to_models_manager_config())
+                        .await,
+                )
+            }
             _ => None,
         };
         let child_multi_agent_messages = ResolvedModelMessages::from_model(

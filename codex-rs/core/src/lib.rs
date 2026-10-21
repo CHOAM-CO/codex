@@ -31,6 +31,7 @@ pub use codex_protocol::turn_input::TurnStartOptions;
 pub use responses_metadata::CodexResponsesMetadata;
 pub use turn_metadata::detached_memory_responses_metadata;
 mod codex_thread;
+mod external_executor;
 mod turn_extension_data;
 pub use turn_extension_data::WithTurnExtensionData;
 mod compact_model_fallback;

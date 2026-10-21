@@ -743,6 +743,7 @@ mod tests {
                     disabled_plugin_ids: Vec::new(),
                     model: "gpt-5.2-codex".to_string(),
                     model_provider_id: "updated-provider".to_string(),
+                    model_executor: None,
                     service_tier: None,
                     approval_policy: AskForApproval::Never,
                     approvals_reviewer: ApprovalsReviewer::User,

@@ -207,6 +207,8 @@ impl SessionStartupPrewarmHandle {
 
 impl Session {
     pub(crate) async fn schedule_startup_prewarm(self: &Arc<Self>, input: PrewarmInput) {
+        let native_model_transport = self.get_config().await.model_executor
+            == codex_protocol::external_executor::ModelExecutor::Codex;
         let websocket_connect_timeout = self.provider().await.websocket_connect_timeout();
         let mut state = self.state.lock().await;
         if state.shutting_down {
@@ -239,6 +241,10 @@ impl Session {
                     warn!("code-mode host startup prewarm failed");
                 }
             });
+        }
+
+        if !native_model_transport {
+            return;
         }
 
         if !self.services.model_client.responses_websocket_enabled() {

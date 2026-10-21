@@ -326,6 +326,7 @@ async fn config_summary_entries_include_runtime_workspace_roots() {
         thread_name: None,
         model: "gpt-5.4".to_string(),
         model_provider_id: config.model_provider_id.clone(),
+        model_executor: Default::default(),
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: config.approvals_reviewer,

@@ -944,7 +944,6 @@ async fn multi_agent_v2_spawn_without_history_allows_agent_type_override() {
     let mut turn = turn;
     turn.config = Arc::new(config);
     turn.multi_agent_version = codex_protocol::protocol::MultiAgentVersion::V2;
-    let parent_provider_id = turn.config.model_provider_id.clone();
 
     let output = SpawnAgentHandlerV2::default()
         .handle(invocation(
@@ -978,7 +977,7 @@ async fn multi_agent_v2_spawn_without_history_allows_agent_type_override() {
         .await;
 
     assert_eq!(snapshot.model, "gpt-5-role-override");
-    assert_eq!(snapshot.model_provider_id, parent_provider_id);
+    assert_eq!(snapshot.model_provider_id, "ollama");
     assert_eq!(snapshot.reasoning_effort, Some(ReasoningEffort::Minimal));
 }
 

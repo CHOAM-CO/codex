@@ -30,6 +30,7 @@ pub use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
 pub use codex_protocol::dynamic_tools::DynamicToolNamespaceSpec;
 pub use codex_protocol::dynamic_tools::DynamicToolNamespaceTool;
 pub use codex_protocol::dynamic_tools::DynamicToolSpec;
+pub use codex_protocol::external_executor::ModelExecutor;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::ThreadGoalStatus as CoreThreadGoalStatus;
@@ -189,6 +190,9 @@ pub struct ThreadStartResponse {
     pub thread: Thread,
     pub model: String,
     pub model_provider: String,
+    /// Executor selected by the live thread configuration.
+    #[serde(default)]
+    pub model_executor: ModelExecutor,
     pub service_tier: Option<String>,
     /// Saved list of disabled plugin IDs. Does not yet filter plugin capabilities.
     #[serde(default)]
@@ -312,6 +316,9 @@ pub struct ThreadSettings {
     pub active_permission_profile: Option<ActivePermissionProfile>,
     pub model: String,
     pub model_provider: String,
+    /// Executor selected by the live thread configuration.
+    #[serde(default)]
+    pub model_executor: ModelExecutor,
     pub service_tier: Option<String>,
     pub effort: Option<ReasoningEffort>,
     pub summary: Option<ReasoningSummary>,
@@ -437,6 +444,9 @@ pub struct ThreadResumeResponse {
     pub thread: Thread,
     pub model: String,
     pub model_provider: String,
+    /// Executor selected by the live thread configuration.
+    #[serde(default)]
+    pub model_executor: ModelExecutor,
     pub service_tier: Option<String>,
     /// Saved list of disabled plugin IDs. Does not yet filter plugin capabilities.
     #[serde(default)]
@@ -642,6 +652,9 @@ pub struct ThreadForkResponse {
     pub thread: Thread,
     pub model: String,
     pub model_provider: String,
+    /// Executor selected by the live thread configuration.
+    #[serde(default)]
+    pub model_executor: ModelExecutor,
     pub service_tier: Option<String>,
     /// Saved list of disabled plugin IDs. Does not yet filter plugin capabilities.
     #[serde(default)]

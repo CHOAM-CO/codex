@@ -45,8 +45,20 @@
         "$ref": "#/definitions/AgentRoleToml"
       },
       "properties": {
+        "default_subagent_executor": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ModelExecutor"
+            }
+          ],
+          "description": "Execution backend paired with the default child model. Omission inherits the parent executor."
+        },
         "default_subagent_model": {
-          "description": "Default model for spawned subagents when the spawn call does not select one.",
+          "description": "Default model when a spawn call omits model, provider, and executor selection.",
+          "type": "string"
+        },
+        "default_subagent_model_provider": {
+          "description": "Provider ID paired with the default subagent model. Omission inherits the parent provider.",
           "type": "string"
         },
         "default_subagent_reasoning_effort": {
@@ -2707,6 +2719,13 @@
       },
       "type": "object"
     },
+    "ModelExecutor": {
+      "enum": [
+        "codex",
+        "antigravity"
+      ],
+      "type": "string"
+    },
     "ModelProviderAuthInfo": {
       "additionalProperties": false,
       "description": "Configuration for obtaining a provider bearer token from a command.",
@@ -2786,6 +2805,14 @@
       "additionalProperties": false,
       "description": "Overrides for the optional API features supported by a custom provider.",
       "properties": {
+        "agent_messages": {
+          "description": "Accepts native `agent_message` Responses input items. Otherwise inter-agent input is sent as an ordinary message envelope.",
+          "type": "boolean"
+        },
+        "encrypted_content": {
+          "description": "Accepts encrypted Responses history and tool-content items. Override for a provider that can replay the source ciphertext.",
+          "type": "boolean"
+        },
         "external_web_access": {
           "description": "Whether hosted web search may access the live web.",
           "type": "boolean"
@@ -7835,6 +7862,14 @@
       "description": "Size of the context window for the model, in tokens.",
       "format": "int64",
       "type": "integer"
+    },
+    "model_executor": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ModelExecutor"
+        }
+      ],
+      "description": "Execution backend. Native Codex is the default."
     },
     "model_instructions_file": {
       "allOf": [

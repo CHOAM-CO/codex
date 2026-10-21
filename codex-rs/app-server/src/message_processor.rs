@@ -1740,6 +1740,15 @@ impl MessageProcessor {
                     codex_app_server_protocol::McpServerEventStreamStopResponse {}.into(),
                 ))
             }
+            ClientRequest::NativeToolList { params, .. } => {
+                self.mcp_processor.native_tool_list(params).await
+            }
+            ClientRequest::NativeToolCall { params, .. } => {
+                self.mcp_processor.native_tool_call(params).await
+            }
+            ClientRequest::ExternalExecutorEvent { params, .. } => {
+                self.mcp_processor.external_executor_event(params).await
+            }
             ClientRequest::McpServerToolCall { params, .. } => {
                 self.mcp_processor
                     .mcp_server_tool_call(&request_id, params)

@@ -1050,3 +1050,139 @@ fn multi_agent_version_uses_compaction_metadata_without_turn_context() -> Result
     );
     Ok(())
 }
+
+#[test]
+fn executor_is_preserved_for_resumed_and_forked_history() {
+    use codex_protocol::external_executor::ModelExecutor;
+    let thread_id = ThreadId::new();
+    for executor in [
+        None,
+        Some(ModelExecutor::Codex),
+        Some(ModelExecutor::Antigravity),
+    ] {
+        let meta = RolloutItem::SessionMeta(SessionMetaLine {
+            meta: SessionMeta {
+                session_id: thread_id.into(),
+                id: thread_id,
+                model_executor: executor,
+                ..Default::default()
+            },
+            git: None,
+        });
+        let serialized = serde_json::to_value(&meta).unwrap();
+        let restored: RolloutItem = serde_json::from_value(serialized).unwrap();
+        let resumed = InitialHistory::Resumed(ResumedHistory {
+            conversation_id: thread_id,
+            history_revision: None,
+            history: Arc::new(vec![restored.clone()]),
+            rollout_path: None,
+        });
+        assert_eq!(resumed.get_model_executor(), executor);
+        assert_eq!(
+            InitialHistory::Forked(vec![restored]).get_model_executor(),
+            executor
+        );
+    }
+}
+
+#[test]
+fn latest_executor_uses_owned_settings_for_resume_and_fork() -> Result<()> {
+    use codex_protocol::external_executor::ModelExecutor;
+    let thread_id = ThreadId::new();
+    let mut snapshot = thread_settings_snapshot(Vec::new())?;
+    snapshot.model_executor = Some(ModelExecutor::Antigravity);
+    let settings = |owner, snapshot| {
+        RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(
+            codex_protocol::protocol::ThreadSettingsAppliedEvent {
+                thread_id: Some(owner),
+                thread_settings: snapshot,
+            },
+        ))
+    };
+    let mut items = vec![RolloutItem::SessionMeta(SessionMetaLine {
+        meta: SessionMeta {
+            id: thread_id,
+            model_executor: Some(ModelExecutor::Codex),
+            ..Default::default()
+        },
+        git: None,
+    })];
+    items.push(settings(thread_id, snapshot.clone()));
+    snapshot.model_executor = Some(ModelExecutor::Codex);
+    items.push(settings(ThreadId::new(), snapshot.clone()));
+    for history in [
+        InitialHistory::Forked(items.clone()),
+        InitialHistory::Resumed(ResumedHistory {
+            conversation_id: thread_id,
+            history_revision: None,
+            history: Arc::new(items.clone()),
+            rollout_path: None,
+        }),
+    ] {
+        assert_eq!(
+            history.get_model_executor(),
+            Some(ModelExecutor::Antigravity)
+        );
+    }
+    items.push(settings(thread_id, snapshot));
+    assert_eq!(
+        InitialHistory::Forked(items).get_model_executor(),
+        Some(ModelExecutor::Codex)
+    );
+    Ok(())
+}
+
+#[test]
+fn saved_model_recovers_owned_settings_and_legacy_turn_context() -> Result<()> {
+    let child_id = ThreadId::new();
+    let parent_id = ThreadId::new();
+    for forked in [false, true] {
+        let mut items = vec![RolloutItem::SessionMeta(SessionMetaLine {
+            meta: SessionMeta {
+                id: child_id,
+                forked_from_id: forked.then_some(parent_id),
+                ..Default::default()
+            },
+            git: None,
+        })];
+        let mut context = turn_context_with_disabled_plugins(None)?;
+        let RolloutItem::TurnContext(ref mut context_item) = context else {
+            unreachable!()
+        };
+        context_item.model = "legacy-recorded-model".into();
+        items.push(context);
+        assert_eq!(
+            InitialHistory::Forked(items.clone()).get_saved_model(),
+            if forked {
+                None
+            } else {
+                Some("legacy-recorded-model")
+            }
+        );
+        let mut owned = thread_settings_snapshot(Vec::new())?;
+        owned.model = "child-recorded-model".into();
+        items.push(RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(
+            codex_protocol::protocol::ThreadSettingsAppliedEvent {
+                thread_id: Some(child_id),
+                thread_settings: owned.clone(),
+            },
+        )));
+        owned.model = "parent-model".into();
+        items.push(RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(
+            codex_protocol::protocol::ThreadSettingsAppliedEvent {
+                thread_id: Some(parent_id),
+                thread_settings: owned,
+            },
+        )));
+        let before = serde_json::to_value(&items)?;
+        let history = InitialHistory::Resumed(ResumedHistory {
+            conversation_id: child_id,
+            history_revision: None,
+            history: Arc::new(items),
+            rollout_path: None,
+        });
+        assert_eq!(history.get_saved_model(), Some("child-recorded-model"));
+        assert_eq!(serde_json::to_value(history.get_rollout_items())?, before);
+    }
+    Ok(())
+}

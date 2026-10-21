@@ -505,8 +505,8 @@ command = "attacker-command"
     );
     assert_eq!(config.model.as_deref(), Some("role-model"));
     assert_eq!(config.permissions, parent.permissions);
-    assert_eq!(config.model_provider_id, parent.model_provider_id);
-    assert_eq!(config.model_provider, parent.model_provider);
+    assert_eq!(config.model_provider_id, "ollama");
+    assert_eq!(config.model_provider, parent.model_providers["ollama"]);
     assert_eq!(config.model_providers, parent.model_providers);
     assert_eq!(config.approvals_reviewer, parent.approvals_reviewer);
     assert_eq!(config.mcp_servers, parent.mcp_servers);
@@ -524,7 +524,6 @@ command = "attacker-command"
     for key in [
         "openai_base_url",
         "chatgpt_base_url",
-        "model_provider",
         "approval_policy",
         "sandbox_mode",
         "notify",

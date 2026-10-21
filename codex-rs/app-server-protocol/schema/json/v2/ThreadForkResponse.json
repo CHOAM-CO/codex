@@ -975,6 +975,13 @@
       ],
       "type": "object"
     },
+    "ModelExecutor": {
+      "enum": [
+        "codex",
+        "antigravity"
+      ],
+      "type": "string"
+    },
     "MultiAgentMode": {
       "description": "Controls the effective multi-agent delegation instructions for a turn. `custom` means the configured mode hint defines the policy instead of a built-in policy.",
       "oneOf": [
@@ -3085,6 +3092,15 @@
     },
     "model": {
       "type": "string"
+    },
+    "modelExecutor": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ModelExecutor"
+        }
+      ],
+      "default": "codex",
+      "description": "Executor selected by the live thread configuration."
     },
     "modelProvider": {
       "type": "string"

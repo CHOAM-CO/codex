@@ -145,6 +145,14 @@ impl ToolRouter {
         router
     }
 
+    pub(crate) fn external_tool_specs(&self) -> Vec<ToolSpec> {
+        self.registry
+            .entries()
+            .filter(|entry| self.exposes_tool(&entry.runtime.tool_name()))
+            .map(|entry| entry.spec().as_ref().clone())
+            .collect()
+    }
+
     pub(crate) fn model_visible_specs(&self) -> Arc<[ToolSpec]> {
         Arc::clone(&self.model_visible_specs)
     }

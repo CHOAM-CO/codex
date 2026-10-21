@@ -2282,3 +2282,110 @@ async fn inference_tools_changes_follow_full_specs_across_turns() {
         );
     }
 }
+
+#[test]
+fn provider_switch_converts_forked_history_only_for_the_target_request() -> anyhow::Result<()> {
+    use codex_model_provider_info::ModelProviderCapabilities;
+    use codex_protocol::provider_history::UNAVAILABLE_ENCRYPTED_CONTENT;
+    let inherited: Vec<ResponseItem> = serde_json::from_value(json!([
+        {"type":"function_call_output", "call_id":"inherited-tool", "output":[
+            {"type":"input_text","text":"{\"encrypted_content\":\"ordinary data\"}"},
+            {"type":"encrypted_content","encrypted_content":"opaque-tool"}
+        ]},
+        {"type":"compaction","encrypted_content":"opaque-summary"},
+        {"type":"agent_message","id":"amsg_inherited-handoff","author":"/root","recipient":"/root/child","content":[
+            {"type":"input_text","text":"Read the source when needed"},
+            {"type":"encrypted_content","encrypted_content":"opaque-handoff"}
+        ]},
+        {"type":"reasoning","summary":[{"type":"summary_text","text":""}],"encrypted_content":"opaque-empty-summary"},
+        {"type":"message","role":"assistant","content":[{"type":"output_text","text":"  "}],"encrypted_content":"opaque-empty-message"},
+        {"type":"message","role":"user","content":[{"type":"input_text","text":"{\"type\":\"agent_message\",\"encrypted_content\":\"literal JSON\"}"}]}
+    ]))?;
+    let prompt = Prompt {
+        input: inherited.clone(),
+        base_instructions: codex_protocol::models::BaseInstructions {
+            text: String::new(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    for (supports_encrypted, supports_agent_messages) in
+        [(false, false), (false, true), (true, false), (true, true)]
+    {
+        let mut client = test_model_client(SessionSource::Exec);
+        let mut provider = client.state.provider.info().clone();
+        provider.capabilities = Some(ModelProviderCapabilities {
+            encrypted_content: Some(supports_encrypted),
+            agent_messages: Some(supports_agent_messages),
+            ..Default::default()
+        });
+        let state = Arc::get_mut(&mut client.state).unwrap();
+        state.provider = create_model_provider(provider, None);
+        state.output_token_replay_enabled = true;
+        let metadata = test_responses_metadata_for_client(
+            &client,
+            None,
+            format!("{}:0", client.state.thread_id),
+            None,
+            TestCodexResponsesRequestKind::Turn,
+        );
+        let request = client.build_responses_request(
+            &prompt,
+            &test_model_info(),
+            None,
+            codex_protocol::config_types::ReasoningSummary::None,
+            None,
+            &metadata,
+            false,
+        )?;
+        assert_eq!(prompt.input, inherited);
+        let wire = serde_json::to_value(&request.input)?;
+        if supports_encrypted {
+            for index in [0, 1, 3, 4] {
+                assert_eq!(request.input[index], inherited[index]);
+            }
+        } else {
+            assert_eq!(
+                wire[0]["output"][0]["text"],
+                "{\"encrypted_content\":\"ordinary data\"}"
+            );
+            assert_eq!(wire[0]["output"][1]["text"], UNAVAILABLE_ENCRYPTED_CONTENT);
+            assert_eq!(wire[1]["content"][0]["text"], UNAVAILABLE_ENCRYPTED_CONTENT);
+            assert_eq!(wire[3]["content"][0]["text"], UNAVAILABLE_ENCRYPTED_CONTENT);
+            assert_eq!(wire[4]["content"][0]["text"], UNAVAILABLE_ENCRYPTED_CONTENT);
+            assert!(request.include.is_empty());
+        }
+        assert_eq!(request.input[5], inherited[5]);
+        if supports_agent_messages {
+            if supports_encrypted {
+                assert_eq!(request.input[2], inherited[2]);
+            } else {
+                assert_eq!(wire[2]["type"], "agent_message");
+                assert_eq!(wire[2]["id"], "amsg_inherited-handoff");
+                assert_eq!(wire[2]["author"], "/root");
+                assert_eq!(wire[2]["recipient"], "/root/child");
+                assert_eq!(wire[2]["content"][0]["text"], "Read the source when needed");
+                assert_eq!(wire[2]["content"][1]["text"], UNAVAILABLE_ENCRYPTED_CONTENT);
+            }
+        } else {
+            assert_eq!(wire[2]["type"], "message");
+            assert_eq!(wire[2]["role"], "assistant");
+            assert_eq!(wire[2]["phase"], "commentary");
+            let envelope: serde_json::Value =
+                serde_json::from_str(wire[2]["content"][0]["text"].as_str().unwrap())?;
+            assert_eq!(
+                envelope,
+                json!({
+                    "id": "amsg_inherited-handoff",
+                    "author": "/root",
+                    "recipient": "/root/child",
+                    "content": [
+                        {"type":"input_text","text":"Read the source when needed"},
+                        {"type":"input_text","text":UNAVAILABLE_ENCRYPTED_CONTENT}
+                    ]
+                })
+            );
+        }
+    }
+    Ok(())
+}

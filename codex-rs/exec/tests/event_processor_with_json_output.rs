@@ -117,6 +117,7 @@ fn session_configured_produces_thread_started_event() {
         thread_name: None,
         model: "codex-mini-latest".to_string(),
         model_provider_id: "test-provider".to_string(),
+        model_executor: Default::default(),
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,

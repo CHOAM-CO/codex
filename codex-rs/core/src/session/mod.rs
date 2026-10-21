@@ -720,29 +720,35 @@ impl Session {
         };
 
         let mut config = Arc::new(config);
-        let refresh_strategy = if session_source.is_non_root_agent() {
-            codex_models_manager::manager::RefreshStrategy::Offline
-        } else {
-            codex_models_manager::manager::RefreshStrategy::OnlineIfUncached
-        };
-        if config.model.is_none()
-            || !matches!(
-                refresh_strategy,
-                codex_models_manager::manager::RefreshStrategy::Offline
-            )
-        {
-            let _ = models_manager
-                .list_models(refresh_strategy, config.http_client_factory())
-                .await;
-        }
-        let model = models_manager
-            .get_default_model(
-                &config.model,
-                allow_provider_model_fallback,
-                refresh_strategy,
-                config.http_client_factory(),
-            )
-            .await;
+        let model =
+            if config.model_executor != codex_protocol::external_executor::ModelExecutor::Codex {
+                config.model.clone().unwrap_or_default()
+            } else {
+                let refresh_strategy = if session_source.is_non_root_agent() {
+                    codex_models_manager::manager::RefreshStrategy::Offline
+                } else {
+                    codex_models_manager::manager::RefreshStrategy::OnlineIfUncached
+                };
+                if config.model.is_none()
+                    || !matches!(
+                        refresh_strategy,
+                        codex_models_manager::manager::RefreshStrategy::Offline
+                    )
+                {
+                    let _ = models_manager
+                        .list_models(refresh_strategy, config.http_client_factory())
+                        .await;
+                }
+                let model = models_manager
+                    .get_default_model(
+                        &config.model,
+                        allow_provider_model_fallback,
+                        refresh_strategy,
+                        config.http_client_factory(),
+                    )
+                    .await;
+                model
+            };
         if model.trim().is_empty() {
             return Err(CodexErr::InvalidRequest(
                 "No models are available. Set `model` explicitly or check your model catalog configuration.".to_string(),

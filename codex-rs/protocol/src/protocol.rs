@@ -1595,6 +1595,8 @@ pub enum EventMsg {
 
     RequestUserInput(RequestUserInputEvent),
 
+    ExternalExecutorRequest(crate::external_executor::ExternalExecutorRunParams),
+
     DynamicToolCallRequest(DynamicToolCallRequest),
 
     DynamicToolCallResponse(DynamicToolCallResponseEvent),
@@ -2332,6 +2334,10 @@ pub struct ThreadSettingsAppliedEvent {
 pub struct ThreadSettingsSnapshot {
     pub model: String,
     pub model_provider_id: String,
+    /// Actual executor persisted with this thread's current settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model_executor: Option<crate::external_executor::ModelExecutor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<String>,
     pub approval_policy: AskForApproval,
@@ -3286,6 +3292,9 @@ pub struct SessionMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_path: Option<String>,
     pub model_provider: Option<String>,
+    /// Model execution backend at thread creation; absent in upstream histories.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_executor: Option<crate::external_executor::ModelExecutor>,
     /// base_instructions for the session. This *should* always be present when creating a new session,
     /// but may be missing for older sessions. If not present, fall back to rendering the base_instructions
     /// from ModelsManager.
@@ -3341,6 +3350,7 @@ impl Default for SessionMeta {
             agent_role: None,
             agent_path: None,
             model_provider: None,
+            model_executor: None,
             base_instructions: None,
             dynamic_tools: None,
             selected_capability_roots: Vec::new(),
@@ -4084,6 +4094,10 @@ pub struct SessionConfiguredEvent {
 
     pub model_provider_id: String,
 
+    /// Executor selected by the live thread configuration.
+    #[serde(default)]
+    pub model_executor: crate::external_executor::ModelExecutor,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<String>,
 
@@ -4141,6 +4155,8 @@ impl<'de> Deserialize<'de> for SessionConfiguredEvent {
             thread_name: Option<String>,
             model: String,
             model_provider_id: String,
+            #[serde(default)]
+            model_executor: crate::external_executor::ModelExecutor,
             service_tier: Option<String>,
             approval_policy: AskForApproval,
             #[serde(default)]
@@ -4179,6 +4195,7 @@ impl<'de> Deserialize<'de> for SessionConfiguredEvent {
             thread_name: wire.thread_name,
             model: wire.model,
             model_provider_id: wire.model_provider_id,
+            model_executor: wire.model_executor,
             service_tier: wire.service_tier,
             approval_policy: wire.approval_policy,
             approvals_reviewer: wire.approvals_reviewer,
@@ -6388,6 +6405,7 @@ mod tests {
                 thread_name: None,
                 model: "codex-mini-latest".to_string(),
                 model_provider_id: "openai".to_string(),
+                model_executor: Default::default(),
                 service_tier: None,
                 approval_policy: AskForApproval::Never,
                 approvals_reviewer: ApprovalsReviewer::User,
@@ -6408,6 +6426,7 @@ mod tests {
                 "thread_id": "67e55044-10b1-426f-9247-bb680e5fe0c8",
                 "model": "codex-mini-latest",
                 "model_provider_id": "openai",
+                "model_executor": "codex",
                 "approval_policy": "never",
                 "approvals_reviewer": "user",
                 "permission_profile": permission_profile,
@@ -6437,6 +6456,18 @@ mod tests {
 
         let event: SessionConfiguredEvent = serde_json::from_value(value)?;
         assert_eq!(event.permission_profile, PermissionProfile::read_only());
+        assert_eq!(
+            event.model_executor,
+            crate::external_executor::ModelExecutor::Codex
+        );
+        let mut external_event = event;
+        external_event.model_executor = crate::external_executor::ModelExecutor::Antigravity;
+        let encoded = serde_json::to_value(external_event)?;
+        assert_eq!(encoded["model_executor"], "antigravity");
+        assert_eq!(
+            serde_json::from_value::<SessionConfiguredEvent>(encoded)?.model_executor,
+            crate::external_executor::ModelExecutor::Antigravity
+        );
         Ok(())
     }
 

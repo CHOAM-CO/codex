@@ -59,6 +59,7 @@ async fn interrupt_if_no_pending_input_handles_cancelled_submission() {
             thread_name: None,
             model: "test".to_string(),
             model_provider_id: "test".to_string(),
+            model_executor: Default::default(),
             service_tier: None,
             approval_policy: AskForApproval::Never,
             approvals_reviewer: ApprovalsReviewer::User,

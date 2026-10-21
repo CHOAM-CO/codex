@@ -106,6 +106,7 @@ impl SideParentStatus {
             ServerRequest::DynamicToolCall { .. }
             | ServerRequest::AttestationGenerate { .. }
             | ServerRequest::CurrentTimeRead { .. }
+            | ServerRequest::ExternalExecutorRun { .. }
             | ServerRequest::ChatgptAuthTokensRefresh { .. } => None,
         }
     }

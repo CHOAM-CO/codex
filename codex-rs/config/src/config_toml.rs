@@ -51,6 +51,7 @@ use codex_protocol::config_types::Verbosity;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::config_types::WebSearchToolConfig;
 use codex_protocol::config_types::WindowsSandboxLevel;
+use codex_protocol::external_executor::ModelExecutor;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::permissions::NetworkSandboxPolicy;
@@ -173,6 +174,8 @@ pub struct ConfigToml {
 
     /// Provider to use from the model_providers map.
     pub model_provider: Option<String>,
+    /// Execution backend. Native Codex is the default.
+    pub model_executor: Option<ModelExecutor>,
 
     /// Size of the context window for the model, in tokens.
     pub model_context_window: Option<i64>,
@@ -766,8 +769,12 @@ pub struct AgentsToml {
     pub max_concurrent_threads_per_session: Option<usize>,
     /// Maximum nesting depth for V1 agent threads. Ignored by V2.
     pub max_depth: Option<i32>,
-    /// Default model for spawned subagents when the spawn call does not select one.
+    /// Default model when a spawn call omits model, provider, and executor selection.
     pub default_subagent_model: Option<String>,
+    /// Provider ID paired with the default subagent model. Omission inherits the parent provider.
+    pub default_subagent_model_provider: Option<String>,
+    /// Execution backend paired with the default child model. Omission inherits the parent executor.
+    pub default_subagent_executor: Option<ModelExecutor>,
     /// Default reasoning effort for spawned subagents when the spawn call does not select one.
     pub default_subagent_reasoning_effort: Option<ReasoningEffort>,
     /// Removed agent-job setting retained as a no-op for compatibility.

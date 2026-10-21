@@ -1,0 +1,80 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ExternalExecutorEvent": {
+      "oneOf": [
+        {
+          "properties": {
+            "delta": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "textDelta"
+              ],
+              "title": "TextDeltaExternalExecutorEventType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "delta",
+            "type"
+          ],
+          "title": "TextDeltaExternalExecutorEvent",
+          "type": "object"
+        },
+        {
+          "description": "A completed call executed by the external engine's own built-in tools.",
+          "properties": {
+            "arguments": true,
+            "callId": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "output": true,
+            "type": {
+              "enum": [
+                "tool"
+              ],
+              "title": "ToolExternalExecutorEventType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "arguments",
+            "callId",
+            "name",
+            "output",
+            "type"
+          ],
+          "title": "ToolExternalExecutorEvent",
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "properties": {
+    "event": {
+      "$ref": "#/definitions/ExternalExecutorEvent"
+    },
+    "runId": {
+      "type": "string"
+    },
+    "threadId": {
+      "type": "string"
+    },
+    "turnId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "event",
+    "runId",
+    "threadId",
+    "turnId"
+  ],
+  "title": "ExternalExecutorEventParams",
+  "type": "object"
+}

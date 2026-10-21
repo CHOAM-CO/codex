@@ -44,6 +44,74 @@ impl McpRequestProcessor {
         }
     }
 
+    pub(crate) async fn native_tool_list(
+        &self,
+        params: codex_app_server_protocol::NativeToolListParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let thread = self
+            .thread_manager
+            .get_thread(
+                codex_protocol::ThreadId::from_string(&params.thread_id)
+                    .map_err(|err| invalid_params(format!("invalid thread id: {err}")))?,
+            )
+            .await
+            .map_err(|err| invalid_params(err.to_string()))?;
+        let tools = thread
+            .external_tool_list(&params.turn_id, &params.run_id)
+            .await
+            .map_err(|err| invalid_params(err.to_string()))?;
+        Ok(Some(
+            codex_app_server_protocol::NativeToolListResponse { tools }.into(),
+        ))
+    }
+    pub(crate) async fn native_tool_call(
+        &self,
+        params: codex_app_server_protocol::NativeToolCallParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let thread = self
+            .thread_manager
+            .get_thread(
+                codex_protocol::ThreadId::from_string(&params.thread_id)
+                    .map_err(|err| invalid_params(format!("invalid thread id: {err}")))?,
+            )
+            .await
+            .map_err(|err| invalid_params(err.to_string()))?;
+        let output = thread
+            .external_tool_call(
+                &params.turn_id,
+                &params.run_id,
+                params.call_id,
+                params.namespace,
+                params.name,
+                params.arguments,
+            )
+            .await
+            .map_err(|err| invalid_params(err.to_string()))?;
+        Ok(Some(
+            codex_app_server_protocol::NativeToolCallResponse::from_output(output).into(),
+        ))
+    }
+    pub(crate) async fn external_executor_event(
+        &self,
+        params: codex_app_server_protocol::ExternalExecutorEventParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let thread = self
+            .thread_manager
+            .get_thread(
+                codex_protocol::ThreadId::from_string(&params.thread_id)
+                    .map_err(|err| invalid_params(format!("invalid thread id: {err}")))?,
+            )
+            .await
+            .map_err(|err| invalid_params(err.to_string()))?;
+        thread
+            .external_executor_event(&params.turn_id, &params.run_id, params.event)
+            .await
+            .map_err(|err| invalid_params(err.to_string()))?;
+        Ok(Some(
+            codex_app_server_protocol::ExternalExecutorEventResponse {}.into(),
+        ))
+    }
+
     pub(crate) async fn mcp_server_oauth_login(
         &self,
         params: McpServerOauthLoginParams,

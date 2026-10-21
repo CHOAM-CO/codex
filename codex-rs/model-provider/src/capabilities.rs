@@ -13,6 +13,8 @@ pub struct ProviderCapabilities {
     pub image_generation: bool,
     pub web_search: bool,
     pub external_web_access: bool,
+    pub encrypted_content: bool,
+    pub agent_messages: bool,
     pub remote_compaction: RemoteCompactionSupport,
 }
 
@@ -22,6 +24,8 @@ impl Default for ProviderCapabilities {
             image_generation: true,
             web_search: true,
             external_web_access: true,
+            encrypted_content: false,
+            agent_messages: false,
             remote_compaction: RemoteCompactionSupport::Unsupported,
         }
     }
@@ -30,6 +34,9 @@ impl Default for ProviderCapabilities {
 impl ProviderCapabilities {
     pub(crate) fn from_config(info: &ModelProviderInfo) -> Self {
         let defaults = Self {
+            agent_messages: info.is_openai(),
+            encrypted_content: info.is_openai()
+                || is_azure_responses_provider(&info.name, info.base_url.as_deref()),
             remote_compaction: if info.is_openai()
                 || is_azure_responses_provider(&info.name, info.base_url.as_deref())
             {
@@ -41,6 +48,10 @@ impl ProviderCapabilities {
         };
         let overrides = info.capabilities.unwrap_or_default();
         Self {
+            agent_messages: overrides.agent_messages.unwrap_or(defaults.agent_messages),
+            encrypted_content: overrides
+                .encrypted_content
+                .unwrap_or(defaults.encrypted_content),
             external_web_access: overrides
                 .external_web_access
                 .unwrap_or(defaults.external_web_access),

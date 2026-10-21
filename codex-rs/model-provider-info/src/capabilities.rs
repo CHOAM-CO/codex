@@ -13,6 +13,12 @@ use serde::Serialize;
 pub struct ModelProviderCapabilities {
     /// Whether hosted web search may access the live web.
     pub external_web_access: Option<bool>,
+    /// Accepts encrypted Responses history and tool-content items.
+    /// Override for a provider that can replay the source ciphertext.
+    pub encrypted_content: Option<bool>,
+    /// Accepts native `agent_message` Responses input items.
+    /// Otherwise inter-agent input is sent as an ordinary message envelope.
+    pub agent_messages: Option<bool>,
     /// Remote context-compaction protocol; omission preserves provider defaults.
     pub remote_compaction: Option<RemoteCompactionSupport>,
 }

@@ -259,6 +259,78 @@
             },
             "method": {
               "enum": [
+                "thread/tool/list"
+              ],
+              "title": "Thread/tool/listRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/NativeToolListParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/tool/listRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "thread/tool/call"
+              ],
+              "title": "Thread/tool/callRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/NativeToolCallParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/tool/callRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "turn/external/event"
+              ],
+              "title": "Turn/external/eventRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ExternalExecutorEventParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Turn/external/eventRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
                 "thread/resume"
               ],
               "title": "Thread/resumeRequestMethod",
@@ -3065,6 +3137,79 @@
         "decision"
       ],
       "title": "ExecCommandApprovalResponse",
+      "type": "object"
+    },
+    "ExternalExecutorRunParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "cwd": {
+          "type": "string"
+        },
+        "effort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "executor": {
+          "$ref": "#/definitions/v2/ModelExecutor"
+        },
+        "fullHistory": {
+          "type": "boolean"
+        },
+        "input": {
+          "items": {
+            "$ref": "#/definitions/v2/ResponseItem"
+          },
+          "type": "array"
+        },
+        "instructions": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cwd",
+        "executor",
+        "fullHistory",
+        "input",
+        "instructions",
+        "model",
+        "runId",
+        "threadId",
+        "turnId"
+      ],
+      "title": "ExternalExecutorRunParams",
+      "type": "object"
+    },
+    "ExternalExecutorRunResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "title": "ExternalExecutorRunResponse",
       "type": "object"
     },
     "FileChange": {
@@ -6467,6 +6612,31 @@
             "params"
           ],
           "title": "Item/permissions/requestApprovalRequest",
+          "type": "object"
+        },
+        {
+          "description": "Execute an external model with native thread context and tool dispatch.",
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "turn/external/run"
+              ],
+              "title": "Turn/external/runRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ExternalExecutorRunParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Turn/external/runRequest",
           "type": "object"
         },
         {
@@ -11796,6 +11966,89 @@
         ],
         "type": "string"
       },
+      "ExternalExecutorEvent": {
+        "oneOf": [
+          {
+            "properties": {
+              "delta": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "textDelta"
+                ],
+                "title": "TextDeltaExternalExecutorEventType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "delta",
+              "type"
+            ],
+            "title": "TextDeltaExternalExecutorEvent",
+            "type": "object"
+          },
+          {
+            "description": "A completed call executed by the external engine's own built-in tools.",
+            "properties": {
+              "arguments": true,
+              "callId": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "output": true,
+              "type": {
+                "enum": [
+                  "tool"
+                ],
+                "title": "ToolExternalExecutorEventType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "arguments",
+              "callId",
+              "name",
+              "output",
+              "type"
+            ],
+            "title": "ToolExternalExecutorEvent",
+            "type": "object"
+          }
+        ]
+      },
+      "ExternalExecutorEventParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "event": {
+            "$ref": "#/definitions/v2/ExternalExecutorEvent"
+          },
+          "runId": {
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string"
+          },
+          "turnId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "event",
+          "runId",
+          "threadId",
+          "turnId"
+        ],
+        "title": "ExternalExecutorEventParams",
+        "type": "object"
+      },
+      "ExternalExecutorEventResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": "ExternalExecutorEventResponse",
+        "type": "object"
+      },
       "FeedbackRequirements": {
         "properties": {
           "enabled": {
@@ -15707,6 +15960,13 @@
         ],
         "type": "object"
       },
+      "ModelExecutor": {
+        "enum": [
+          "codex",
+          "antigravity"
+        ],
+        "type": "string"
+      },
       "ModelListParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
@@ -15996,6 +16256,95 @@
           "v2"
         ],
         "type": "string"
+      },
+      "NativeToolCallParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "arguments": true,
+          "callId": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runId": {
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string"
+          },
+          "turnId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "arguments",
+          "callId",
+          "name",
+          "runId",
+          "threadId",
+          "turnId"
+        ],
+        "title": "NativeToolCallParams",
+        "type": "object"
+      },
+      "NativeToolCallResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "isError": {
+            "type": "boolean"
+          },
+          "output": {
+            "$ref": "#/definitions/v2/ResponseItem"
+          }
+        },
+        "required": [
+          "isError",
+          "output"
+        ],
+        "title": "NativeToolCallResponse",
+        "type": "object"
+      },
+      "NativeToolListParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "runId": {
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string"
+          },
+          "turnId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "runId",
+          "threadId",
+          "turnId"
+        ],
+        "title": "NativeToolListParams",
+        "type": "object"
+      },
+      "NativeToolListResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "tools": {
+            "items": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "tools"
+        ],
+        "title": "NativeToolListResponse",
+        "type": "object"
       },
       "NetworkAccess": {
         "enum": [
@@ -21791,6 +22140,15 @@
           "model": {
             "type": "string"
           },
+          "modelExecutor": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/v2/ModelExecutor"
+              }
+            ],
+            "default": "codex",
+            "description": "Executor selected by the live thread configuration."
+          },
           "modelProvider": {
             "type": "string"
           },
@@ -24330,6 +24688,15 @@
           "model": {
             "type": "string"
           },
+          "modelExecutor": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/v2/ModelExecutor"
+              }
+            ],
+            "default": "codex",
+            "description": "Executor selected by the live thread configuration."
+          },
           "modelProvider": {
             "type": "string"
           },
@@ -24772,6 +25139,15 @@
           "model": {
             "type": "string"
           },
+          "modelExecutor": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/v2/ModelExecutor"
+              }
+            ],
+            "default": "codex",
+            "description": "Executor selected by the live thread configuration."
+          },
           "modelProvider": {
             "type": "string"
           },
@@ -25052,6 +25428,15 @@
           },
           "model": {
             "type": "string"
+          },
+          "modelExecutor": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/v2/ModelExecutor"
+              }
+            ],
+            "default": "codex",
+            "description": "Executor selected by the live thread configuration."
           },
           "modelProvider": {
             "type": "string"

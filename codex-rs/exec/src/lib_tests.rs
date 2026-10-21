@@ -836,16 +836,22 @@ async fn session_configured_from_thread_response_preserves_parent_thread_id() {
     let mut response = sample_thread_start_response();
     response.thread.parent_thread_id = Some(parent_thread_id.to_string());
     response.thread.forked_from_id = Some(forked_from_id.to_string());
+    response.model_executor = codex_protocol::external_executor::ModelExecutor::Antigravity;
 
     let event = session_configured_from_thread_start_response(&response, &config)
         .expect("build bootstrap session configured event");
 
     assert_eq!(event.parent_thread_id, Some(parent_thread_id));
     assert_eq!(event.forked_from_id, Some(forked_from_id));
+    assert_eq!(
+        event.model_executor,
+        codex_protocol::external_executor::ModelExecutor::Antigravity
+    );
 }
 
 fn sample_thread_start_response() -> ThreadStartResponse {
     ThreadStartResponse {
+        model_executor: Default::default(),
         disabled_plugin_ids: Vec::new(),
         thread: codex_app_server_protocol::Thread {
             originator: None,

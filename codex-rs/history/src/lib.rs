@@ -465,6 +465,64 @@ impl InitialHistory {
             .unwrap_or_default()
     }
 
+    /// Model selection owned by this thread, excluding inherited fork settings.
+    pub fn get_saved_model(&self) -> Option<&str> {
+        let meta = self.get_session_meta()?;
+        if let Some(model) = self
+            .get_rollout_items()
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event))
+                    if event.thread_id == Some(meta.id) =>
+                {
+                    Some(event.thread_settings.model.as_str())
+                }
+                _ => None,
+            })
+        {
+            return Some(model);
+        }
+        // Older un-forked histories predate owned settings snapshots. A fork can
+        // contain the parent's TurnContext, which cannot identify the child model.
+        if meta.forked_from_id.is_some()
+            || meta.history_base.is_some()
+            || meta.subagent_history_start_ordinal.is_some()
+        {
+            return None;
+        }
+        self.get_rollout_items()
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                RolloutItem::TurnContext(context) => Some(context.model.as_str()),
+                RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event))
+                    if event.thread_id.is_none() =>
+                {
+                    Some(event.thread_settings.model.as_str())
+                }
+                _ => None,
+            })
+    }
+
+    pub fn get_model_executor(&self) -> Option<codex_protocol::external_executor::ModelExecutor> {
+        let meta = self.get_session_meta()?;
+        // Copied ancestor snapshots do not supersede the owning thread's settings.
+        // A fork takes its source thread's latest selection until explicitly overridden.
+        self.get_rollout_items()
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event))
+                    if event.thread_id == Some(meta.id) =>
+                {
+                    event.thread_settings.model_executor
+                }
+                _ => None,
+            })
+            .or(meta.model_executor)
+    }
+
     pub fn get_multi_agent_version(&self) -> Option<MultiAgentVersion> {
         match self {
             Self::New | Self::Cleared => None,

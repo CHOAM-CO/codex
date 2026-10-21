@@ -98,6 +98,26 @@ impl SessionTask for RegularTask {
                 Some(*prewarmed_client_session)
             }
         };
+        if ctx.config.model_executor != codex_protocol::external_executor::ModelExecutor::Codex {
+            let mut next_input = input;
+            loop {
+                let result = crate::external_executor::run_external_turn(
+                    Arc::clone(&sess),
+                    Arc::clone(&ctx),
+                    next_input,
+                    cancellation_token.child_token(),
+                )
+                .await?;
+                if !sess.input_queue.has_pending_input(&sess.active_turn).await {
+                    return Ok(result);
+                }
+                next_input = sess
+                    .input_queue
+                    .get_pending_input(&sess.active_turn)
+                    .await
+                    .0;
+            }
+        }
         let mut next_input = input;
         let mut prewarmed_client_session = prewarmed_client_session;
         let mut mcp_startup_requirements = McpStartupRequirements::default();

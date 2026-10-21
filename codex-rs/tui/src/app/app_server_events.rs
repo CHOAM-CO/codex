@@ -735,6 +735,7 @@ impl App {
             ServerRequest::DynamicToolCall { .. }
                 | ServerRequest::AttestationGenerate { .. }
                 | ServerRequest::CurrentTimeRead { .. }
+                | ServerRequest::ExternalExecutorRun { .. }
                 | ServerRequest::ApplyPatchApproval { .. }
                 | ServerRequest::ExecCommandApproval { .. }
         );

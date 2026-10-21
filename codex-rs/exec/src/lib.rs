@@ -1136,6 +1136,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
             response.thread.path.clone(),
             response.model,
             response.model_provider,
+            response.model_executor,
             response.service_tier,
             response.approval_policy.to_core(),
             response.approvals_reviewer.to_core(),
@@ -1566,6 +1567,7 @@ fn session_configured_from_thread_start_response(
         response.thread.path.clone(),
         response.model.clone(),
         response.model_provider.clone(),
+        response.model_executor,
         response.service_tier.clone(),
         response.approval_policy.to_core(),
         response.approvals_reviewer.to_core(),
@@ -1590,6 +1592,7 @@ fn session_configured_from_thread_resume_response(
         response.thread.path.clone(),
         response.model.clone(),
         response.model_provider.clone(),
+        response.model_executor,
         response.service_tier.clone(),
         response.approval_policy.to_core(),
         response.approvals_reviewer.to_core(),
@@ -1623,6 +1626,7 @@ fn session_configured_from_thread_response(
     rollout_path: Option<PathBuf>,
     model: String,
     model_provider_id: String,
+    model_executor: codex_protocol::external_executor::ModelExecutor,
     service_tier: Option<String>,
     approval_policy: AskForApproval,
     approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer,
@@ -1653,6 +1657,7 @@ fn session_configured_from_thread_response(
         thread_name,
         model,
         model_provider_id,
+        model_executor,
         service_tier,
         approval_policy,
         approvals_reviewer,
@@ -2166,6 +2171,16 @@ async fn handle_server_request(
                 request_id,
                 &method,
                 "external current time is not supported in exec mode".to_string(),
+            )
+            .await
+        }
+        ServerRequest::ExternalExecutorRun { request_id, .. } => {
+            reject_server_request(
+                client,
+                request_id,
+                &method,
+                "external model execution requires a client with an external executor adapter"
+                    .to_string(),
             )
             .await
         }
