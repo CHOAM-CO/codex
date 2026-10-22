@@ -1,5 +1,6 @@
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_rollout::ResponseItemEnvelope;
 use codex_rollout::RolloutItem;
 use std::any::Any;
 use std::future::Future;
@@ -64,6 +65,21 @@ use crate::UpdatedProject;
 
 /// Future returned by [`ThreadStore`] operations.
 pub type ThreadStoreFuture<'a, T> = Pin<Box<dyn Future<Output = ThreadStoreResult<T>> + Send + 'a>>;
+
+pub(crate) fn is_local_realtime_transcript_tail(
+    envelope: &ResponseItemEnvelope,
+    thread_id: ThreadId,
+) -> bool {
+    envelope.metadata.as_ref().is_some_and(|metadata| {
+        metadata
+            .realtime_transcript_tail
+            .as_ref()
+            .is_some_and(|source| source.thread_id == thread_id)
+            && !metadata.inherited_user_message
+            && metadata.user_input_order.is_some()
+            && envelope.item.id().is_some()
+    })
+}
 
 /// Why thread persistence is being requested.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -205,6 +221,23 @@ pub trait ThreadStore: Any + Send + Sync {
         &self,
         params: LoadThreadHistoryParams,
     ) -> ThreadStoreFuture<'_, StoredThreadHistory>;
+
+    /// Loads durable host-recorded transcript tails owned by this thread.
+    ///
+    /// Returns original response-item envelopes, including their item identity, source and input
+    /// order. Referenced history must obey its frozen bounds; inherited items, legacy text without
+    /// typed provenance and compacted replacements are not local transcript tails. Compaction must
+    /// not hide earlier original tails. Callers fence pending writes before requesting this read.
+    fn load_local_realtime_transcript_tails(
+        &self,
+        _params: LoadThreadHistoryParams,
+    ) -> ThreadStoreFuture<'_, Vec<ResponseItemEnvelope>> {
+        Box::pin(async {
+            Err(ThreadStoreError::Unsupported {
+                operation: "load_local_realtime_transcript_tails",
+            })
+        })
+    }
 
     /// Loads the persisted rollout items needed to reconstruct the latest model-visible context.
     ///

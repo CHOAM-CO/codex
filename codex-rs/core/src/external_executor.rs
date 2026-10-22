@@ -349,20 +349,17 @@ impl Session {
         self.try_ensure_rollout_materialized(PersistContext::Standard)
             .await?;
         self.flush_rollout().await?;
-        let history = self
+        let tails = self
             .services
             .thread_store
-            .load_history(LoadThreadHistoryParams {
+            .load_local_realtime_transcript_tails(LoadThreadHistoryParams {
                 thread_id: self.thread_id,
                 include_archived: false,
             })
             .await
             .map_err(|err| CodexErr::Fatal(err.to_string()))?;
         let mut updates = Vec::new();
-        for item in history.items {
-            let RolloutItem::ResponseItem(envelope) = item else {
-                continue;
-            };
+        for envelope in tails {
             let Some(metadata) = envelope.metadata.as_ref() else {
                 continue;
             };

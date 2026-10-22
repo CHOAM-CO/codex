@@ -11,6 +11,7 @@ mod paginated_fork;
 mod pending_thread_metadata;
 mod projects;
 mod read_thread;
+mod realtime_transcript_tail;
 mod revert_thread;
 mod rollout_migration;
 // This lands before the reader PRs that consume the shared lineage resolver.
@@ -575,6 +576,13 @@ impl ThreadStore for LocalThreadStore {
         params: LoadThreadHistoryParams,
     ) -> ThreadStoreFuture<'_, StoredThreadHistory> {
         Box::pin(LocalThreadStore::load_history(self, params))
+    }
+
+    fn load_local_realtime_transcript_tails(
+        &self,
+        params: LoadThreadHistoryParams,
+    ) -> ThreadStoreFuture<'_, Vec<codex_rollout::ResponseItemEnvelope>> {
+        Box::pin(realtime_transcript_tail::load(self, params))
     }
 
     fn load_latest_model_context(

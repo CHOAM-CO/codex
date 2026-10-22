@@ -18,6 +18,7 @@ use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
+use codex_rollout::ResponseItemEnvelope;
 use codex_rollout::RolloutItem;
 use codex_rollout::into_persisted_rollout_items;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -46,6 +47,7 @@ use crate::ThreadStoreFuture;
 use crate::ThreadStoreResult;
 use crate::UpdateThreadMetadataParams;
 use crate::error::reject_paginated_history_mode;
+use crate::store::is_local_realtime_transcript_tail;
 
 static IN_MEMORY_THREAD_STORES: OnceLock<Mutex<HashMap<String, Arc<InMemoryThreadStore>>>> =
     OnceLock::new();
@@ -976,6 +978,33 @@ impl ThreadStore for InMemoryThreadStore {
         params: LoadThreadHistoryParams,
     ) -> ThreadStoreFuture<'_, StoredThreadHistory> {
         Box::pin(InMemoryThreadStore::load_history(self, params))
+    }
+
+    fn load_local_realtime_transcript_tails(
+        &self,
+        params: LoadThreadHistoryParams,
+    ) -> ThreadStoreFuture<'_, Vec<ResponseItemEnvelope>> {
+        Box::pin(async move {
+            let state = self.state.lock().await;
+            let items =
+                state
+                    .histories
+                    .get(&params.thread_id)
+                    .ok_or(ThreadStoreError::ThreadNotFound {
+                        thread_id: params.thread_id,
+                    })?;
+            Ok(items
+                .iter()
+                .filter_map(|item| match item {
+                    RolloutItem::ResponseItem(envelope)
+                        if is_local_realtime_transcript_tail(envelope, params.thread_id) =>
+                    {
+                        Some(envelope.clone())
+                    }
+                    _ => None,
+                })
+                .collect())
+        })
     }
 
     fn load_latest_model_context(
