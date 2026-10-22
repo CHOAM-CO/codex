@@ -70,6 +70,13 @@ use uuid::Uuid;
 
 /// Materialize an external tool's original response records without interpreting
 /// legacy result objects as the newer, host-authored result envelope.
+pub fn is_external_tool_response_item(item: &codex_protocol::models::ResponseItem) -> bool {
+    matches!(item,
+        codex_protocol::models::ResponseItem::FunctionCall { namespace, .. }
+        | codex_protocol::models::ResponseItem::FunctionCallOutput { namespace, .. }
+        if namespace.as_deref() == Some("antigravity"))
+}
+
 pub fn project_external_tool_call(
     call: &ResponseItemEnvelope,
     result: Option<&ResponseItemEnvelope>,
@@ -185,6 +192,51 @@ pub fn project_external_tool_call(
         })),
         duration_ms: None,
     })
+}
+
+/// Complete a previously projected call, including when the original call and
+/// this output were persisted on opposite sides of a projection checkpoint.
+pub fn project_external_tool_result(
+    existing: &ThreadItem,
+    result: &ResponseItemEnvelope,
+) -> Option<ThreadItem> {
+    use codex_protocol::models::ResponseItem;
+    let ThreadItem::McpToolCall {
+        id,
+        server,
+        tool,
+        arguments,
+        external_executor,
+        ..
+    } = existing
+    else {
+        return None;
+    };
+    let source = external_executor.as_ref();
+    let mut call: ResponseItemEnvelope = ResponseItem::FunctionCall {
+        id: source
+            .and_then(|source| source.get("callItemId"))
+            .and_then(serde_json::Value::as_str)
+            .map(|id| codex_protocol::ResponseItemId::from_server(id.to_owned())),
+        encrypted_content: None,
+        status: source
+            .and_then(|source| source.get("status"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        namespace: Some(server.clone()),
+        name: tool.clone(),
+        arguments: source
+            .and_then(|source| source.get("arguments"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| arguments.to_string()),
+        encrypted_function_args: None,
+        call_id: id.clone(),
+        internal_chat_message_metadata_passthrough: None,
+    }
+    .into();
+    call.metadata = result.metadata.clone();
+    project_external_tool_call(&call, Some(result))
 }
 
 #[cfg(test)]

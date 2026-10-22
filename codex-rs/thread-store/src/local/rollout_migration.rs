@@ -1025,7 +1025,14 @@ impl LocalThreadStore {
             .map_err(migration_error)?
             .len();
         let projection = thread_history::projection_state(self, thread_id).await?;
-        if projection.is_none_or(|state| state.next_byte_offset != expected_length) {
+        if projection.as_ref().is_some_and(|state| !state.is_current()) {
+            super::thread_history_materialization::materialize_to_sqlite(
+                self,
+                thread_id,
+                projection_path,
+            )
+            .await?;
+        } else if projection.is_none_or(|state| state.next_byte_offset != expected_length) {
             thread_history::delete_thread(self, thread_id).await?;
             self.project_rollout_in_batches(thread_id, projection_path, limiter)
                 .await?;
@@ -1163,6 +1170,17 @@ impl LocalThreadStore {
                         Default::default()
                     } else {
                         project_rollout_line(&line)
+                    },
+                    external_tool: match &line.item {
+                        RolloutItem::ResponseItem(item)
+                            if !is_inherited_subagent_history
+                                && codex_app_server_protocol::is_external_tool_response_item(
+                                    &item.item,
+                                ) =>
+                        {
+                            Some(item.clone())
+                        }
+                        _ => None,
                     },
                     realtime_item: match line.item {
                         RolloutItem::RealtimeItem(item) if !is_inherited_subagent_history => {

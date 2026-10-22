@@ -40,6 +40,7 @@ async fn materialize_to_sqlite_with_state_db(
     let projection_state = super::thread_history::projection_state(store, thread_id).await?;
     let start_offset = projection_state
         .as_ref()
+        .filter(|state| state.is_current())
         .map_or(0, |state| state.next_byte_offset);
     if projection_state.is_none()
         && codex_rollout::existing_rollout_path(rollout_path)
@@ -58,6 +59,7 @@ async fn materialize_to_sqlite_with_state_db(
     let subagent_history_start_ordinal = session_meta.subagent_history_start_ordinal;
     let expected_ordinal = projection_state
         .as_ref()
+        .filter(|state| state.is_current())
         .map_or(initial_ordinal, |state| state.next_ordinal);
     let (projections, next_offset) = read_projection_steps(
         rollout_path,
@@ -242,10 +244,20 @@ fn read_projection_steps_sync(
         } else {
             project_rollout_line(&line)
         };
-        let fallback_created_at_ms = if changes
-            .changed_items
-            .iter()
-            .any(|item| item.started_at_ms.is_none())
+        let external_tool = match &line.item {
+            RolloutItem::ResponseItem(item)
+                if !is_inherited_subagent_history
+                    && codex_app_server_protocol::is_external_tool_response_item(&item.item) =>
+            {
+                Some(item.clone())
+            }
+            _ => None,
+        };
+        let fallback_created_at_ms = if external_tool.is_some()
+            || changes
+                .changed_items
+                .iter()
+                .any(|item| item.started_at_ms.is_none())
             || (!is_inherited_subagent_history
                 && matches!(&line.item, RolloutItem::RealtimeItem(_)))
         {
@@ -313,6 +325,7 @@ fn read_projection_steps_sync(
                 end_byte_offset: line_end_offset,
                 fallback_created_at_ms,
                 changes,
+                external_tool,
                 realtime_item: match line.item {
                     RolloutItem::RealtimeItem(item) if !is_inherited_subagent_history => Some(item),
                     _ => None,

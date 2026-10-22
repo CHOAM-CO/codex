@@ -4,12 +4,12 @@ use codex_app_server_protocol::TurnStatus;
 use codex_protocol::ThreadId;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::realtime::RealtimeItem;
+use codex_rollout::ResponseItemEnvelope;
 
 use super::LocalThreadStore;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
 
-mod external_tools;
 mod read;
 mod realtime;
 mod search;
@@ -23,6 +23,8 @@ pub(super) use search::search_thread_occurrences;
 pub(super) use turn_lookup::find_source_turn;
 pub(super) use turn_lookup::find_visible_turn;
 
+const PROJECTION_VERSION: i64 = 1;
+
 /// A valid complete rollout line with its absolute byte span in durable JSONL.
 ///
 /// `start_byte_offset..end_byte_offset` includes the terminating newline.
@@ -33,6 +35,7 @@ pub(super) struct ProjectedRolloutLine {
     pub fallback_created_at_ms: Option<i64>,
     pub changes: ThreadHistoryChangeSet,
     pub realtime_item: Option<RealtimeItem>,
+    pub external_tool: Option<ResponseItemEnvelope>,
 }
 
 /// One ordered update to apply while advancing a rollout projection checkpoint.
@@ -50,6 +53,42 @@ pub(super) enum RolloutProjectionStep {
 pub(super) struct RolloutProjectionState {
     pub next_byte_offset: u64,
     pub next_ordinal: u64,
+    pub version: i64,
+}
+
+impl RolloutProjectionState {
+    pub(super) fn is_current(&self) -> bool {
+        self.version >= PROJECTION_VERSION
+    }
+}
+
+/// Refresh an older derived view once, under the existing owner lock. Ordinary
+/// page reads then use SQLite without opening or parsing the rollout again.
+pub(super) async fn ensure_current_projection(
+    store: &LocalThreadStore,
+    lineage: &super::rollout_lineage::RolloutLineage,
+) -> ThreadStoreResult<()> {
+    for segment in lineage.segments() {
+        if projection_state(store, segment.rollout_id())
+            .await?
+            .is_some_and(|state| state.is_current())
+        {
+            continue;
+        }
+        let _owner = store.live_writer_locks.lock(segment.thread_id).await;
+        if projection_state(store, segment.rollout_id())
+            .await?
+            .is_none_or(|state| !state.is_current())
+        {
+            super::thread_history_materialization::materialize_to_sqlite(
+                store,
+                segment.rollout_id(),
+                &segment.rollout_path,
+            )
+            .await?;
+        }
+    }
+    Ok(())
 }
 
 pub(super) async fn projection_state(
@@ -68,9 +107,9 @@ pub(super) async fn projection_state(
     }
 
     let pool = store.thread_history_db().await?;
-    let state = sqlx::query_as::<_, (i64, i64)>(
+    let state = sqlx::query_as::<_, (i64, i64, i64)>(
         r#"
-SELECT next_rollout_byte_offset, next_rollout_ordinal
+SELECT next_rollout_byte_offset, next_rollout_ordinal, projection_version
 FROM thread_history_projection_state
 WHERE thread_id = ?
         "#,
@@ -80,7 +119,7 @@ WHERE thread_id = ?
     .await
     .map_err(thread_history_error)?;
     state
-        .map(|(next_byte_offset, next_ordinal)| {
+        .map(|(next_byte_offset, next_ordinal, version)| {
             Ok(RolloutProjectionState {
                 next_byte_offset: u64::try_from(next_byte_offset).map_err(|_| {
                     ThreadStoreError::Internal {
@@ -96,6 +135,7 @@ WHERE thread_id = ?
                         ),
                     }
                 })?,
+                version,
             })
         })
         .transpose()
@@ -118,9 +158,9 @@ pub(super) async fn apply_projection(
         .await
         .map_err(thread_history_error)?;
     let thread_id = thread_id.to_string();
-    let projection_state = sqlx::query_as::<_, (i64, i64)>(
+    let projection_state = sqlx::query_as::<_, (i64, i64, i64)>(
         r#"
-SELECT next_rollout_byte_offset, next_rollout_ordinal
+SELECT next_rollout_byte_offset, next_rollout_ordinal, projection_version
 FROM thread_history_projection_state
 WHERE thread_id = ?
         "#,
@@ -129,8 +169,10 @@ WHERE thread_id = ?
     .fetch_optional(&mut *transaction)
     .await
     .map_err(thread_history_error)?;
-    let (expected_offset, mut next_ordinal) =
-        projection_state.unwrap_or((0, sqlite_integer(initial_ordinal, "rollout ordinal")?));
+    let (expected_offset, mut next_ordinal) = match projection_state {
+        Some((offset, ordinal, version)) if version >= PROJECTION_VERSION => (offset, ordinal),
+        _ => (0, sqlite_integer(initial_ordinal, "rollout ordinal")?),
+    };
     let start_offset = sqlite_integer(start_offset, "rollout byte offset")?;
     if expected_offset != start_offset {
         return Err(ThreadStoreError::Internal {
@@ -159,6 +201,16 @@ WHERE thread_id = ?
                     projection.changes,
                 )
                 .await?;
+                if let Some(external_tool) = projection.external_tool {
+                    apply_external_tool(
+                        &mut transaction,
+                        thread_id.as_str(),
+                        ordinal,
+                        projection.fallback_created_at_ms,
+                        external_tool,
+                    )
+                    .await?;
+                }
                 if let Some(item) = projection.realtime_item {
                     let item_json = serde_json::to_string(&item).map_err(thread_history_error)?;
                     sqlx::query(
@@ -226,16 +278,19 @@ ON CONFLICT(thread_id, item_id) DO NOTHING
 INSERT INTO thread_history_projection_state (
     thread_id,
     next_rollout_byte_offset,
-    next_rollout_ordinal
-) VALUES (?, ?, ?)
+    next_rollout_ordinal,
+    projection_version
+) VALUES (?, ?, ?, ?)
 ON CONFLICT(thread_id) DO UPDATE SET
     next_rollout_byte_offset = excluded.next_rollout_byte_offset,
-    next_rollout_ordinal = excluded.next_rollout_ordinal
+    next_rollout_ordinal = excluded.next_rollout_ordinal,
+    projection_version = excluded.projection_version
         "#,
     )
     .bind(thread_id.as_str())
     .bind(sqlite_integer(next_offset, "rollout byte offset")?)
     .bind(next_ordinal)
+    .bind(PROJECTION_VERSION)
     .execute(&mut *transaction)
     .await
     .map_err(thread_history_error)?;
@@ -284,6 +339,92 @@ pub(super) async fn delete_thread(
         .commit()
         .await
         .map_err(thread_history_delete_error)
+}
+
+/// Raw external records join through the existing projected call identity.
+/// Keeping the call in thread_items makes an interrupted call/output pair
+/// resumable without a second state store or a scan of earlier rollout bytes.
+async fn apply_external_tool(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    thread_id: &str,
+    ordinal: i64,
+    created_at_ms: Option<i64>,
+    envelope: ResponseItemEnvelope,
+) -> ThreadStoreResult<()> {
+    use codex_protocol::models::ResponseItem;
+
+    let call_id = match &envelope.item {
+        ResponseItem::FunctionCall { call_id, .. } => call_id,
+        ResponseItem::FunctionCallOutput {
+            call_id: Some(call_id),
+            ..
+        } => call_id,
+        _ => return Ok(()),
+    };
+    let turn_id = sqlx::query_scalar::<_, String>(
+        "SELECT turn_id FROM thread_turns WHERE thread_id = ? AND rollout_ordinal <= ? ORDER BY rollout_ordinal DESC LIMIT 1",
+    ).bind(thread_id).bind(ordinal).fetch_optional(&mut **transaction).await.map_err(thread_history_error)?
+        .ok_or_else(|| thread_history_error(format!("external tool {call_id} has no recorded turn at ordinal {ordinal}")))?;
+    let existing = sqlx::query_as::<_, (String, Option<i64>, i64)>(
+        "SELECT item_json, completed_at_ms, updated_at_ordinal FROM thread_items WHERE thread_id = ? AND turn_id = ? AND item_id = ?",
+    ).bind(thread_id).bind(&turn_id).bind(call_id).fetch_optional(&mut **transaction).await.map_err(thread_history_error)?;
+    let existing_item = existing
+        .as_ref()
+        .map(|(json, _, _)| serde_json::from_str::<ThreadItem>(json))
+        .transpose()
+        .map_err(thread_history_error)?;
+    let item = match &envelope.item {
+        ResponseItem::FunctionCall { .. } => {
+            codex_app_server_protocol::project_external_tool_call(&envelope, None)
+        }
+        ResponseItem::FunctionCallOutput { .. } => {
+            let call = existing_item.as_ref().ok_or_else(|| {
+                thread_history_error(format!(
+                    "external tool output {call_id} has no projected call in turn {turn_id}"
+                ))
+            })?;
+            codex_app_server_protocol::project_external_tool_result(call, &envelope)
+        }
+        _ => None,
+    };
+    let Some(mut item) = item else {
+        return Ok(());
+    };
+    if existing
+        .as_ref()
+        .is_some_and(|(_, completed_at, updated)| completed_at.is_some() || *updated > ordinal)
+        && let Some(existing) = existing_item
+        && let ThreadItem::McpToolCall {
+            external_executor, ..
+        } = &item
+    {
+        let source = external_executor.clone();
+        item = existing;
+        if let ThreadItem::McpToolCall {
+            external_executor, ..
+        } = &mut item
+        {
+            *external_executor = source;
+        }
+    }
+    apply_change_set(
+        transaction,
+        thread_id,
+        ordinal,
+        0,
+        0,
+        created_at_ms,
+        ThreadHistoryChangeSet {
+            changed_items: vec![codex_app_server_protocol::ThreadHistoryItemChange {
+                turn_id,
+                item,
+                started_at_ms: None,
+                completed_at_ms: None,
+            }],
+            ..Default::default()
+        },
+    )
+    .await
 }
 
 async fn apply_change_set(
@@ -431,7 +572,30 @@ WHERE thread_id = ?
         .map_err(thread_history_error)?;
     }
 
-    for item in changes.changed_items {
+    for mut item in changes.changed_items {
+        if let ThreadItem::McpToolCall {
+            id,
+            server,
+            external_executor,
+            ..
+        } = &mut item.item
+            && server == "antigravity"
+            && external_executor.is_none()
+        {
+            let previous = sqlx::query_scalar::<_, String>(
+                "SELECT item_json FROM thread_items WHERE thread_id = ? AND turn_id = ? AND item_id = ?",
+            ).bind(thread_id).bind(&item.turn_id).bind(id.as_str())
+                .fetch_optional(&mut **transaction).await.map_err(thread_history_error)?;
+            if let Some(previous) = previous
+                && let ThreadItem::McpToolCall {
+                    external_executor: source,
+                    ..
+                } =
+                    serde_json::from_str::<ThreadItem>(&previous).map_err(thread_history_error)?
+            {
+                *external_executor = source;
+            }
+        }
         let created_at_ms =
             item.started_at_ms
                 .or(fallback_created_at_ms)

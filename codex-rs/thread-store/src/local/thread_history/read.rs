@@ -114,6 +114,7 @@ pub(in crate::local) async fn list_turns(
     let lineage = store
         .resolve_rollout_lineage(params.thread_id, /*initial_path*/ None)
         .await?;
+    super::ensure_current_projection(store, &lineage).await?;
     let pool = store.thread_history_db().await?;
     let page = page_turn_rows(
         pool,
@@ -190,8 +191,8 @@ pub(in crate::local) async fn list_items(
     let lineage = store
         .resolve_rollout_lineage(params.thread_id, /*initial_path*/ None)
         .await?;
+    super::ensure_current_projection(store, &lineage).await?;
     let pool = store.thread_history_db().await?;
-    super::external_tools::backfill(store, &lineage, params.turn_id.as_deref(), None).await?;
     let page = page_item_rows(pool, &lineage, &params).await?;
 
     Ok(ItemPage {
