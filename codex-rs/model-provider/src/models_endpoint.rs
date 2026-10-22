@@ -32,6 +32,7 @@ use codex_models_manager::model_info::model_info_from_slug;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CoreResult;
+use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelVisibility;
 use codex_protocol::openai_models::ModelsResponse;
@@ -65,11 +66,17 @@ struct CompatibleModel {
     context_length: Option<i64>,
     max_model_len: Option<i64>,
     meta: Option<CompatibleModelMeta>,
+    architecture: Option<CompatibleModelArchitecture>,
 }
 
 #[derive(Deserialize)]
 struct CompatibleModelMeta {
     n_ctx: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct CompatibleModelArchitecture {
+    input_modalities: Option<Vec<InputModality>>,
 }
 
 fn decode_models_response(body: &[u8]) -> Result<Vec<ModelInfo>, codex_api::ApiError> {
@@ -88,7 +95,7 @@ fn decode_models_response(body: &[u8]) -> Result<Vec<ModelInfo>, codex_api::ApiE
             .into_iter()
             .map(|model| {
                 // Reuse Codex's unknown-model defaults for capabilities the provider
-                // does not advertise, while retaining its actual context capacity.
+                // does not advertise, retaining its actual context capacity and input modalities.
                 let context_window = [
                     model.context_window,
                     model.context_length,
@@ -104,6 +111,12 @@ fn decode_models_response(body: &[u8]) -> Result<Vec<ModelInfo>, codex_api::ApiE
                 if let Some(context_window) = context_window {
                     info.context_window = Some(context_window);
                     info.max_context_window = Some(context_window);
+                }
+                if let Some(input_modalities) = model
+                    .architecture
+                    .and_then(|architecture| architecture.input_modalities)
+                {
+                    info.input_modalities = input_modalities;
                 }
                 info
             })
