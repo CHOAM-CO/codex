@@ -65,6 +65,12 @@ pub struct ResponseItemEnvelope {
 ///
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 pub struct CodexHarnessMetadata {
+    /// Host-created terminal speech, distinct from user-supplied text with similar markup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realtime_transcript_tail: Option<RealtimeTranscriptTailSource>,
+    /// Exact external builtin observation; distinguishes the host envelope from legacy output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_executor_tool: Option<ExternalExecutorToolMetadata>,
     /// Complete retained records actually delivered by this Guardian message. Host-only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub guardian_sources: Vec<RetainedSource>,
@@ -136,6 +142,41 @@ pub struct CodexHarnessMetadata {
     /// Sender context captured by the host when this task message was accepted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_user_messages: Option<Box<SenderUserMessages>>,
+}
+
+/// Original local recording identity. Forks retain this source thread identity.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+pub struct RealtimeTranscriptTailSource {
+    pub thread_id: codex_protocol::ThreadId,
+    pub turn_id: String,
+    pub realtime_submission_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+pub struct ExternalExecutorToolMetadata {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present_json"
+    )]
+    pub output: Option<serde_json::Value>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present_json"
+    )]
+    pub error: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<serde_json::Value>,
+}
+
+fn deserialize_present_json<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
 }
 
 fn deserialize_mcp_attribution_checkpoint<'de, D>(

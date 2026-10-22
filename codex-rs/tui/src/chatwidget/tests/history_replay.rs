@@ -1333,6 +1333,7 @@ async fn replayed_mcp_tool_call_stays_active_until_completion() {
         read_only_hint: None,
         result: None,
         error: None,
+        external_executor: None,
         duration_ms: None,
     };
     chat.replay_thread_item(
@@ -1390,6 +1391,7 @@ async fn failed_repl_mcp_tool_call_preserves_status_and_result() {
                         meta: None,
                     })),
                     error: None,
+                    external_executor: None,
                     duration_ms: Some(5),
                 },
             }),
@@ -1449,6 +1451,7 @@ async fn deferred_mcp_lifecycle_events_keep_fifo_after_stream_finishes() {
         read_only_hint: None,
         result: None,
         error: None,
+        external_executor: None,
         duration_ms: None,
     });
     assert!(!chat.interrupts.is_empty());
@@ -1471,6 +1474,7 @@ async fn deferred_mcp_lifecycle_events_keep_fifo_after_stream_finishes() {
             meta: None,
         })),
         error: None,
+        external_executor: None,
         duration_ms: Some(5),
     });
 

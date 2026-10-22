@@ -43,6 +43,27 @@ pub(in crate::local) async fn list_timeline(
     store: &LocalThreadStore,
     params: ListTimelineParams,
 ) -> ThreadStoreResult<TimelinePage> {
+    let page = list_timeline_projected(store, params.clone()).await?;
+    if let (Some(first), Some(last)) = (page.items.first(), page.items.last()) {
+        let lineage = store
+            .resolve_rollout_lineage(params.thread_id, None)
+            .await?;
+        super::external_tools::backfill(
+            store,
+            &lineage,
+            None,
+            Some((entry_key(first).0, entry_key(last).0)),
+        )
+        .await?;
+        return list_timeline_projected(store, params).await;
+    }
+    Ok(page)
+}
+
+async fn list_timeline_projected(
+    store: &LocalThreadStore,
+    params: ListTimelineParams,
+) -> ThreadStoreResult<TimelinePage> {
     validate_thread_for_paginated_reads(
         store,
         params.thread_id,

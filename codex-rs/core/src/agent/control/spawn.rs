@@ -687,6 +687,14 @@ impl LocalAgentControl {
         session_source: Option<SessionSource>,
         options: SpawnAgentOptions,
     ) -> CodexResult<(LiveAgent, ThreadConfigSnapshot)> {
+        if options.fork_mode.is_some()
+            && config.model_executor
+                == codex_protocol::external_executor::ModelExecutor::Antigravity
+        {
+            return Err(CodexErr::InvalidRequest(
+                "Antigravity headless does not support a full-history child fork; use a fresh child with fork_turns=none".to_string(),
+            ));
+        }
         let membership = self.runtime.admit_start()?;
         let spawn_started_at = Instant::now();
         let state = self.runtime.upgrade()?;

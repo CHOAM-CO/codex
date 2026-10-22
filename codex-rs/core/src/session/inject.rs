@@ -119,14 +119,24 @@ impl Session {
         model_info: &ModelInfo,
         items: Vec<ResponseItemEnvelope>,
     ) {
+        self.record_annotated_conversation_items_and_collect(turn_context, model_info, items)
+            .await;
+    }
+
+    pub(crate) async fn record_annotated_conversation_items_and_collect(
+        &self,
+        turn_context: &TurnContext,
+        model_info: &ModelInfo,
+        items: Vec<ResponseItemEnvelope>,
+    ) -> Vec<ResponseItem> {
         if items.iter().all(|item| item.metadata.is_none()) {
             let items = items
                 .into_iter()
                 .map(ResponseItemEnvelope::into_item)
                 .collect::<Vec<_>>();
-            self.record_conversation_items(turn_context, model_info, &items)
+            return self
+                .record_conversation_items_and_collect(turn_context, model_info, &items)
                 .await;
-            return;
         }
 
         let (annotated_items, image_preparations) = self
@@ -138,7 +148,7 @@ impl Session {
             annotated_items,
             image_preparations,
         )
-        .await;
+        .await
     }
 
     pub(crate) async fn prepare_annotated_conversation_items_for_history(
@@ -168,6 +178,29 @@ impl Session {
             }));
         }
         (annotated_items, image_preparations)
+    }
+
+    /// Realtime closure must observe an append failure before advertising saved speech.
+    pub(crate) async fn record_realtime_transcript_item(
+        &self,
+        turn_context: &TurnContext,
+        item: ResponseItemEnvelope,
+    ) -> std::io::Result<()> {
+        let (items, images) = self
+            .prepare_annotated_conversation_items_for_history(
+                turn_context,
+                turn_context.model_info(),
+                vec![item],
+            )
+            .await;
+        self.record_prepared_conversation_items_with_durability(
+            turn_context,
+            turn_context.model_info(),
+            items,
+            images,
+        )
+        .await
+        .1
     }
 
     /// Injects items into active work, or records them without starting a turn.

@@ -1094,6 +1094,7 @@ async fn mcp_tool_call_completion_notification_contains_truncated_large_result()
         read_only_hint: None,
         result: Some(result),
         error: None,
+        external_executor: None,
         duration_ms: None,
     })?;
     assert!(serialized_item.len() < DEFAULT_OUTPUT_BYTES_CAP * 2 + 2048);
@@ -1206,6 +1207,7 @@ async fn mcp_tool_call_hint_survives_mid_call_thread_read_and_resume() -> Result
         read_only_hint: Some(true),
         result: None,
         error: None,
+        external_executor: None,
         duration_ms: None,
     };
     let resumed_item = resumed_thread

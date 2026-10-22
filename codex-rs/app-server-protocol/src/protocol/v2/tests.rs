@@ -3623,6 +3623,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
             read_only_hint: Some(true),
             result: None,
             error: None,
+            external_executor: None,
             duration_ms: None,
         }
     );
@@ -3670,6 +3671,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
                 meta: Some(json!({"trace": "1"})),
             })),
             error: None,
+            external_executor: None,
             duration_ms: Some(42),
         }
     );
@@ -3696,6 +3698,7 @@ fn mcp_tool_call_app_context_serializes_connector_id() {
         read_only_hint: Some(false),
         result: None,
         error: None,
+        external_executor: None,
         duration_ms: None,
     };
 

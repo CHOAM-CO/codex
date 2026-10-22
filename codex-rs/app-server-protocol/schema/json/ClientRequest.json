@@ -1220,16 +1220,24 @@
           "type": "object"
         },
         {
-          "description": "A completed call executed by the external engine's own built-in tools.",
+          "description": "A call observed from the external engine's own built-in tools.",
           "properties": {
             "arguments": true,
             "callId": {
               "type": "string"
             },
+            "error": true,
             "name": {
               "type": "string"
             },
             "output": true,
+            "source": true,
+            "status": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "type": {
               "enum": [
                 "tool"
@@ -1242,7 +1250,6 @@
             "arguments",
             "callId",
             "name",
-            "output",
             "type"
           ],
           "title": "ToolExternalExecutorEvent",

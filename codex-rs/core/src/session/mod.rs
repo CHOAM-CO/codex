@@ -2484,9 +2484,9 @@ impl Session {
         self.send_event_raw(event).await;
         self.maybe_notify_parent_of_terminal_turn(turn_context, &legacy_source)
             .await;
-        self.maybe_mirror_event_text_to_realtime(&legacy_source)
+        self.maybe_mirror_event_text_to_realtime(&turn_context.sub_id, &legacy_source)
             .await;
-        self.maybe_clear_realtime_handoff_for_event(&legacy_source)
+        self.maybe_clear_realtime_handoff_for_event(&turn_context.sub_id, &legacy_source)
             .await;
 
         let show_raw_agent_reasoning = self.show_raw_agent_reasoning();
@@ -2573,7 +2573,7 @@ impl Session {
             .await;
     }
 
-    async fn maybe_mirror_event_text_to_realtime(&self, msg: &EventMsg) {
+    async fn maybe_mirror_event_text_to_realtime(&self, turn_id: &str, msg: &EventMsg) {
         if self.conversation.running_state().await.is_none() {
             return;
         }
@@ -2597,6 +2597,8 @@ impl Session {
                     .await
                 {
                     debug!("failed to stream event text to realtime conversation: {err}");
+                    self.report_realtime_delivery_failure(turn_id, "stream handoff output", &err)
+                        .await;
                 }
                 return;
             }
@@ -2620,17 +2622,40 @@ impl Session {
         };
         if let Err(err) = result {
             debug!("failed to mirror event text to realtime conversation: {err}");
+            self.report_realtime_delivery_failure(turn_id, "send handoff output", &err)
+                .await;
         }
     }
 
-    async fn maybe_clear_realtime_handoff_for_event(&self, msg: &EventMsg) {
+    async fn maybe_clear_realtime_handoff_for_event(&self, turn_id: &str, msg: &EventMsg) {
         if !matches!(msg, EventMsg::TurnComplete(_)) {
             return;
         }
         if let Err(err) = self.conversation.handoff_complete().await {
             debug!("failed to finalize realtime handoff output: {err}");
+            self.report_realtime_delivery_failure(turn_id, "finalize handoff output", &err)
+                .await;
         }
         self.conversation.clear_active_handoff().await;
+    }
+
+    async fn report_realtime_delivery_failure(
+        &self,
+        turn_id: &str,
+        operation: &str,
+        error: &CodexErr,
+    ) {
+        let call = self.conversation.current_submission_id().await;
+        self.send_event_raw(Event {
+            id: turn_id.to_owned(),
+            msg: EventMsg::Warning(WarningEvent {
+                message: format!(
+                    "{operation} failed (realtime call {}): {error}",
+                    call.as_deref().unwrap_or("unavailable")
+                ),
+            }),
+        })
+        .await;
     }
 
     pub(crate) async fn send_event_raw(&self, event: Event) {
@@ -2680,6 +2705,8 @@ impl Session {
             && let Err(error) = self.send_realtime_history_effects(&event.id, effects).await
         {
             warn!("failed to persist realtime history: {error}");
+            self.report_realtime_history_failure(&event.id, &error)
+                .await;
         }
         // Persist the event into rollout storage; the store applies its persistence policy.
         if persist {
@@ -2693,6 +2720,8 @@ impl Session {
             && let Err(error) = self.send_realtime_history_effects(&event.id, effects).await
         {
             warn!("failed to persist realtime history: {error}");
+            self.report_realtime_history_failure(&event.id, &error)
+                .await;
         }
         // Save the completed review and its terminal event together before the parent sees
         // the decision. Turn completion skips its separate before/after barriers for this case.
@@ -3619,6 +3648,16 @@ impl Session {
         model_info: &ModelInfo,
         items: &[ResponseItem],
     ) {
+        self.record_conversation_items_and_collect(turn_context, model_info, items)
+            .await;
+    }
+
+    pub(crate) async fn record_conversation_items_and_collect(
+        &self,
+        turn_context: &TurnContext,
+        model_info: &ModelInfo,
+        items: &[ResponseItem],
+    ) -> Vec<ResponseItem> {
         let (items, image_preparations) = self
             .prepare_conversation_items_for_history(turn_context, model_info, items)
             .await;
@@ -3627,22 +3666,34 @@ impl Session {
             .into_iter()
             .map(ResponseItemEnvelope::new)
             .collect();
-        self.record_prepared_conversation_items(
-            turn_context,
-            model_info,
-            items,
-            image_preparations,
-        )
-        .await;
+        self.record_prepared_conversation_items(turn_context, model_info, items, image_preparations)
+            .await
     }
 
     async fn record_prepared_conversation_items(
         &self,
         turn_context: &TurnContext,
         model_info: &ModelInfo,
+        items: Vec<ResponseItemEnvelope>,
+        image_preparations: Vec<ImagePreparationMetadata>,
+    ) -> Vec<ResponseItem> {
+        self.record_prepared_conversation_items_with_durability(
+            turn_context,
+            model_info,
+            items,
+            image_preparations,
+        )
+        .await
+        .0
+    }
+
+    async fn record_prepared_conversation_items_with_durability(
+        &self,
+        turn_context: &TurnContext,
+        model_info: &ModelInfo,
         mut items: Vec<ResponseItemEnvelope>,
         image_preparations: Vec<ImagePreparationMetadata>,
-    ) {
+    ) -> (Vec<ResponseItem>, std::io::Result<()>) {
         // Save the originating history budget for replay.
         // Preserve any existing tool-specific override.
         let policy: codex_utils_output_truncation::TruncationPolicy =
@@ -3741,7 +3792,11 @@ impl Session {
         }
         let rollout_items: Vec<RolloutItem> =
             items.into_iter().map(RolloutItem::ResponseItem).collect();
-        if self.persist_rollout_items(&rollout_items).await
+        let persistence = self.try_persist_rollout_items(&rollout_items).await;
+        if let Err(error) = &persistence {
+            error!("failed to record rollout items: {error:#}");
+        }
+        if persistence.is_ok()
             && let Some(revision) = mcp_revision
         {
             self.services
@@ -3757,6 +3812,7 @@ impl Session {
         }
         self.send_raw_response_items(turn_context, &response_items)
             .await;
+        (response_items, persistence)
     }
 
     pub(crate) async fn record_step_world_state_if_changed(
@@ -4041,6 +4097,16 @@ impl Session {
         model_info: &ModelInfo,
         communication: InterAgentCommunication,
     ) {
+        self.record_inter_agent_communication_and_collect(turn_context, model_info, communication)
+            .await;
+    }
+
+    pub(crate) async fn record_inter_agent_communication_and_collect(
+        &self,
+        turn_context: &TurnContext,
+        model_info: &ModelInfo,
+        communication: InterAgentCommunication,
+    ) -> Vec<ResponseItem> {
         let response_item = communication.to_model_input_item();
         let (items, _) = self
             .prepare_conversation_items_for_history(
@@ -4092,6 +4158,7 @@ impl Session {
         .await;
         drop(boundary);
         self.send_raw_response_items(turn_context, items).await;
+        items.to_vec()
     }
 
     async fn maybe_warn_on_server_model_mismatch(
@@ -4433,6 +4500,63 @@ impl Session {
             .collect()
     }
 
+    /// Effective instruction sources for a client-owned model transport. Never recover policy
+    /// from conversation history, tool output, or compacted snapshots.
+    pub(crate) async fn external_executor_instructions(&self, step: &StepContext) -> String {
+        use crate::context::world_state::{
+            AgentsMdState, CollaborationModeState, ManagedDeveloperInstructionsState,
+            MultiAgentModeState, MultiAgentUsageHintState,
+        };
+        let turn = &step.turn;
+        let mut sections = vec![self.get_prompt_base_instructions().await.text];
+        if let Some(instructions) = turn.developer_instructions.as_deref()
+            && !instructions.is_empty()
+        {
+            sections.push(DeveloperInstructions::new(instructions).render());
+        }
+        let mut state = WorldState::default();
+        state.add_section(ManagedDeveloperInstructionsState::new(
+            turn.config
+                .config_layer_stack
+                .requirements()
+                .additional_developer_instructions
+                .as_ref(),
+        ));
+        state.add_section(AgentsMdState::new(step.loaded_agents_md.as_deref()));
+        if turn.config.include_collaboration_mode_instructions {
+            state.add_section(CollaborationModeState::from_collaboration_mode(
+                &step.settings.effective_collaboration_mode(),
+                codex_prompts::ResolvedModelMessages::from_model(&step.settings.model_info)
+                    .collaboration_modes(),
+                turn.config.update_plan_enabled,
+                turn.config.model_catalog.is_some(),
+            ));
+        }
+        let mut mode = MultiAgentModeState::new(multi_agents::effective_multi_agent_mode(step));
+        if let Some(hint) = multi_agents::usage_hint_text(step) {
+            let hint = MultiAgentUsageHintState::new(hint);
+            mode = mode.with_usage_hint(&hint);
+            state.add_section(hint);
+        }
+        state.add_section(mode);
+        for update in state.render_full().1 {
+            match update.content {
+                WorldStateUpdateContent::Fragment(fragment) => sections.push(fragment.render()),
+                WorldStateUpdateContent::Item(item) => {
+                    if let ResponseItem::Message { content, .. } = *item {
+                        sections.extend(content.into_iter().filter_map(|item| match item {
+                            ContentItem::InputText { text }
+                            | ContentItem::OutputText { text, .. } => Some(text),
+                            _ => None,
+                        }));
+                    }
+                }
+            }
+        }
+        sections.retain(|section| !section.is_empty());
+        sections.join("\n\n")
+    }
+
     /// Normally both inputs come from the same step. Async compaction uses the prefix's
     /// world state so later state updates can stay in history unchanged.
     /// Returns rendered items with placement preserved for the caller's history layout.
@@ -4714,13 +4838,24 @@ impl Session {
 
     #[tracing::instrument(level = "trace", skip_all, fields(item_count = items.len()))]
     pub(crate) async fn persist_rollout_items(&self, items: &[RolloutItem]) -> bool {
-        if let Some(live_thread) = self.live_thread()
-            && let Err(e) = live_thread.append_items(items).await
-        {
+        if let Err(e) = self.try_persist_rollout_items(items).await {
             error!("failed to record rollout items: {e:#}");
             return false;
         }
         true
+    }
+
+    pub(crate) async fn try_persist_rollout_items(
+        &self,
+        items: &[RolloutItem],
+    ) -> std::io::Result<()> {
+        if let Some(live_thread) = self.live_thread() {
+            live_thread
+                .append_items(items)
+                .await
+                .map_err(std::io::Error::other)?;
+        }
+        Ok(())
     }
 
     pub(crate) async fn clone_history(&self) -> ContextManager {
@@ -5230,6 +5365,26 @@ impl Session {
         metadata: UserInputMetadata,
         persist_context: PersistContext,
     ) {
+        self.record_user_prompt_and_emit_turn_item_and_collect(
+            turn_context,
+            model_info,
+            input,
+            client_id,
+            metadata,
+            persist_context,
+        )
+        .await;
+    }
+
+    pub(crate) async fn record_user_prompt_and_emit_turn_item_and_collect(
+        &self,
+        turn_context: &TurnContext,
+        model_info: &ModelInfo,
+        input: &[UserInput],
+        client_id: Option<String>,
+        metadata: UserInputMetadata,
+        persist_context: PersistContext,
+    ) -> Vec<ResponseItem> {
         // Persist the user message to history, but emit the turn item from `UserInput` so
         // UI-only `text_elements` are preserved. `ResponseItem::Message` does not carry
         // those spans, and `record_response_item_and_emit_turn_item` would drop them.
@@ -5269,18 +5424,20 @@ impl Session {
             &prepared_items,
             &user_image_content_indices,
         );
-        self.record_prepared_conversation_items(
-            turn_context,
-            model_info,
-            prepared_items,
-            image_preparations,
-        )
-        .await;
+        let recorded = self
+            .record_prepared_conversation_items(
+                turn_context,
+                model_info,
+                prepared_items,
+                image_preparations,
+            )
+            .await;
         user_message_item.client_id = client_id;
         let turn_item = TurnItem::UserMessage(user_message_item);
         self.emit_turn_item_started(turn_context, &turn_item).await;
         self.emit_turn_item_completed(turn_context, turn_item).await;
         self.ensure_rollout_materialized(persist_context).await;
+        recorded
     }
 
     pub(crate) async fn notify_stream_error(

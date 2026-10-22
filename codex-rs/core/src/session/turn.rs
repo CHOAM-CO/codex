@@ -18,7 +18,6 @@ use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::feedback_tags;
 use crate::hook_runtime::drain_async_hook_results;
 use crate::hook_runtime::inspect_pending_input;
-use crate::hook_runtime::record_additional_contexts;
 use crate::hook_runtime::record_pending_input;
 use crate::hook_runtime::run_legacy_after_agent_hook;
 use crate::hook_runtime::run_pending_session_start_hooks;
@@ -1039,6 +1038,19 @@ pub(crate) async fn run_hooks_and_record_inputs(
     input: &[TurnInput],
     persist_context: PersistContext,
 ) -> bool {
+    run_hooks_and_record_inputs_and_collect(sess, turn_context, model_info, input, persist_context)
+        .await
+        .0
+}
+
+/// Returns only the batch accepted and prepared by the normal input recording path.
+pub(crate) async fn run_hooks_and_record_inputs_and_collect(
+    sess: &Arc<Session>,
+    turn_context: &Arc<TurnContext>,
+    model_info: &ModelInfo,
+    input: &[TurnInput],
+    persist_context: PersistContext,
+) -> (bool, Vec<ResponseItem>) {
     // Cancellation can reach this path before Guardian's tools and context are
     // resolved. Only finalized evidence may enter reusable reviewer history.
     if sess
@@ -1047,15 +1059,23 @@ pub(crate) async fn run_hooks_and_record_inputs(
         .get::<crate::guardian::PendingReviewContext>()
         .is_some()
     {
-        return false;
+        return (false, Vec::new());
     }
     let mut blocked_input = false;
     let mut accepted_user_input = false;
+    let mut recorded = Vec::new();
     for input_item in input {
         let hook_outcome = inspect_pending_input(sess, turn_context, input_item).await;
         if hook_outcome.should_stop {
             blocked_input = true;
-            record_additional_contexts(sess, turn_context, hook_outcome.additional_contexts).await;
+            recorded.extend(
+                crate::hook_runtime::record_additional_contexts_and_collect(
+                    sess,
+                    turn_context,
+                    hook_outcome.additional_contexts,
+                )
+                .await,
+            );
         } else {
             if matches!(input_item, TurnInput::UserInput { content, .. } if !content.is_empty()) {
                 accepted_user_input = true;
@@ -1068,18 +1088,20 @@ pub(crate) async fn run_hooks_and_record_inputs(
             } else {
                 persist_context
             };
-            record_pending_input(
-                sess,
-                turn_context,
-                model_info,
-                input_item.clone(),
-                hook_outcome.additional_contexts,
-                input_persist_context,
-            )
-            .await;
+            recorded.extend(
+                record_pending_input(
+                    sess,
+                    turn_context,
+                    model_info,
+                    input_item.clone(),
+                    hook_outcome.additional_contexts,
+                    input_persist_context,
+                )
+                .await,
+            );
         }
     }
-    blocked_input && !accepted_user_input
+    (blocked_input && !accepted_user_input, recorded)
 }
 
 fn turn_user_input(input: &[TurnInput]) -> Vec<UserInput> {

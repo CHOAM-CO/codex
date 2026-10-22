@@ -187,6 +187,35 @@
         }
       ]
     },
+    "ExternalExecutorContextUpdate": {
+      "properties": {
+        "item": {
+          "$ref": "#/definitions/ResponseItem"
+        },
+        "itemId": {
+          "type": "string"
+        },
+        "order": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "item",
+        "itemId",
+        "order",
+        "threadId",
+        "turnId"
+      ],
+      "type": "object"
+    },
     "FunctionCallOutputBody": {
       "anyOf": [
         {
@@ -1440,6 +1469,13 @@
     }
   },
   "properties": {
+    "contextUpdates": {
+      "description": "Host-authored local context saved without starting an inference turn.",
+      "items": {
+        "$ref": "#/definitions/ExternalExecutorContextUpdate"
+      },
+      "type": "array"
+    },
     "cwd": {
       "type": "string"
     },
@@ -1451,9 +1487,6 @@
     },
     "executor": {
       "$ref": "#/definitions/ModelExecutor"
-    },
-    "fullHistory": {
-      "type": "boolean"
     },
     "input": {
       "items": {
@@ -1467,6 +1500,12 @@
     "model": {
       "type": "string"
     },
+    "parentThreadId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "runId": {
       "type": "string"
     },
@@ -1478,9 +1517,9 @@
     }
   },
   "required": [
+    "contextUpdates",
     "cwd",
     "executor",
-    "fullHistory",
     "input",
     "instructions",
     "model",

@@ -689,7 +689,7 @@ fn spawn_agent_common_properties_v2(
         (
             "fork_turns".to_string(),
             JsonSchema::string(Some(
-                "Parent history to inherit. Defaults to `all`; use `none` to start without parent history. Only `all` and `none` are supported.".to_string(),
+                "Parent history to inherit. Defaults to `none`, starting fresh; use `all` for an explicit Codex history fork. Only `all` and `none` are supported. Antigravity does not support a full-history child fork.".to_string(),
             )),
         ),
         (

@@ -62,10 +62,130 @@ use codex_protocol::protocol::WebSearchEndEvent;
 #[cfg(test)]
 use codex_protocol::review_format::REVIEW_FALLBACK_MESSAGE;
 use codex_rollout::CompactedItem;
+use codex_rollout::ResponseItemEnvelope;
 use codex_rollout::RolloutItem;
 use std::collections::HashMap;
 use tracing::warn;
 use uuid::Uuid;
+
+/// Materialize an external tool's original response records without interpreting
+/// legacy result objects as the newer, host-authored result envelope.
+pub fn project_external_tool_call(
+    call: &ResponseItemEnvelope,
+    result: Option<&ResponseItemEnvelope>,
+) -> Option<ThreadItem> {
+    use codex_protocol::models::ResponseItem;
+    use serde_json::Value;
+    use serde_json::json;
+
+    let ResponseItem::FunctionCall {
+        id,
+        call_id,
+        namespace,
+        name,
+        arguments,
+        status,
+        ..
+    } = &call.item
+    else {
+        return None;
+    };
+    if namespace.as_deref() != Some("antigravity") {
+        return None;
+    }
+    let result = result.filter(|result| {
+        matches!(&result.item,
+        ResponseItem::FunctionCallOutput { call_id: Some(result_call_id), .. }
+        if result_call_id == call_id)
+    });
+    let received = call
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.external_executor_tool.as_ref())
+        .or_else(|| {
+            result
+                .and_then(|result| result.metadata.as_ref())
+                .and_then(|metadata| metadata.external_executor_tool.as_ref())
+        });
+    let legacy_output = result.and_then(|result| match &result.item {
+        ResponseItem::FunctionCallOutput { output, .. } => Some(output),
+        _ => None,
+    });
+    let output = if let Some(received) = received {
+        received.output.clone()
+    } else {
+        legacy_output.map(|output| match output.text_content() {
+            Some(text) => serde_json::from_str(text).unwrap_or_else(|_| json!(text)),
+            None => serde_json::to_value(output).expect("tool output is serializable"),
+        })
+    };
+    let error = received.and_then(|received| received.error.as_ref());
+    let received_status = received
+        .and_then(|received| received.status.as_deref())
+        .or(status.as_deref());
+    let status = match received_status.map(str::to_ascii_lowercase).as_deref() {
+        _ if error.is_some()
+            || legacy_output.is_some_and(|output| output.success == Some(false)) =>
+        {
+            McpToolCallStatus::Failed
+        }
+        Some("failed" | "failure" | "error" | "cancelled" | "canceled") => {
+            McpToolCallStatus::Failed
+        }
+        Some("done" | "completed" | "complete" | "success" | "succeeded") => {
+            McpToolCallStatus::Completed
+        }
+        _ if output.is_some() => McpToolCallStatus::Completed,
+        _ => McpToolCallStatus::InProgress,
+    };
+    let result_item_id = result.and_then(|result| match &result.item {
+        ResponseItem::FunctionCallOutput { id, .. } => id.as_deref(),
+        _ => None,
+    });
+    let result = output.map(|output| {
+        Box::new(McpToolCallResult {
+            content: vec![json!({"type":"text","text":match &output {
+                Value::String(text) => text.clone(),
+                _ => output.to_string(),
+            }})],
+            structured_content: Some(match received {
+                Some(received) => {
+                    serde_json::to_value(received).expect("external tool metadata is serializable")
+                }
+                None => output,
+            }),
+            meta: None,
+        })
+    });
+    Some(ThreadItem::McpToolCall {
+        id: call_id.clone(),
+        server: namespace.clone().unwrap_or_default(),
+        tool: name.clone(),
+        arguments: serde_json::from_str(arguments).unwrap_or_else(|_| json!(arguments)),
+        status,
+        app_context: None,
+        mcp_app_resource_uri: None,
+        mcp_app_ui: None,
+        plugin_id: None,
+        read_only_hint: None,
+        result,
+        error: error.map(|error| McpToolCallError {
+            message: error
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| error.to_string()),
+        }),
+        external_executor: Some(json!({
+            "callId":call_id,
+            "callItemId":id,
+            "resultItemId":result_item_id,
+            "arguments":arguments,
+            "status":received_status,
+            "received":received,
+        })),
+        duration_ms: None,
+    })
+}
 
 #[cfg(test)]
 use crate::protocol::v2::CommandAction;
@@ -251,6 +371,7 @@ pub struct ThreadHistoryBuilder {
     current_rollout_index: usize,
     next_rollout_index: usize,
     active_change_set: Option<ThreadHistoryChangeSet>,
+    external_tool_calls: HashMap<String, (String, ResponseItemEnvelope, bool)>,
 }
 
 impl Default for ThreadHistoryBuilder {
@@ -268,6 +389,7 @@ impl ThreadHistoryBuilder {
             current_rollout_index: 0,
             next_rollout_index: 0,
             active_change_set: None,
+            external_tool_calls: HashMap::new(),
         }
     }
 
@@ -426,7 +548,7 @@ impl ThreadHistoryBuilder {
         match item {
             RolloutItem::EventMsg(event) => self.handle_event(event),
             RolloutItem::Compacted(payload) => self.handle_compacted(payload),
-            RolloutItem::ResponseItem(item) => self.handle_response_item(&item.item),
+            RolloutItem::ResponseItem(item) => self.handle_response_item(item),
             RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::TurnContext(_)
@@ -475,7 +597,48 @@ impl ThreadHistoryBuilder {
         self.active_change_set.take().unwrap_or_default()
     }
 
-    fn handle_response_item(&mut self, item: &codex_protocol::models::ResponseItem) {
+    fn handle_response_item(&mut self, envelope: &ResponseItemEnvelope) {
+        use codex_protocol::models::ResponseItem;
+        let item = &envelope.item;
+        match item {
+            ResponseItem::FunctionCall {
+                namespace, call_id, ..
+            } if namespace.as_deref() == Some("antigravity") => {
+                let turn_id = self.ensure_turn().id.clone();
+                let has_materialized = self.current_turn.as_ref().is_some_and(|turn| {
+                    turn.items.iter().any(|item| item.id() == call_id.as_str())
+                }) && !self.external_tool_calls.contains_key(call_id);
+                if !has_materialized
+                    || envelope
+                        .metadata
+                        .as_ref()
+                        .is_some_and(|metadata| metadata.external_executor_tool.is_some())
+                {
+                    if let Some(item) = project_external_tool_call(envelope, None) {
+                        self.upsert_external_tool_item(&turn_id, item, has_materialized);
+                    }
+                    self.external_tool_calls.insert(
+                        call_id.clone(),
+                        (turn_id, envelope.clone(), has_materialized),
+                    );
+                }
+                return;
+            }
+            ResponseItem::FunctionCallOutput {
+                call_id: Some(call_id),
+                namespace,
+                ..
+            } if namespace.as_deref() == Some("antigravity") => {
+                if let Some((turn_id, call, materialized)) =
+                    self.external_tool_calls.get(call_id).cloned()
+                    && let Some(item) = project_external_tool_call(&call, Some(envelope))
+                {
+                    self.upsert_external_tool_item(&turn_id, item, materialized);
+                }
+                return;
+            }
+            _ => {}
+        }
         let codex_protocol::models::ResponseItem::Message {
             role, content, id, ..
         } = item
@@ -499,6 +662,41 @@ impl ThreadHistoryBuilder {
                 .map(crate::protocol::v2::HookPromptFragment::from)
                 .collect(),
         });
+    }
+
+    fn upsert_external_tool_item(
+        &mut self,
+        turn_id: &str,
+        mut item: ThreadItem,
+        materialized: bool,
+    ) {
+        if materialized {
+            let existing = self
+                .current_turn
+                .as_ref()
+                .filter(|turn| turn.id == turn_id)
+                .or_else(|| self.turns.iter().find(|turn| turn.id == turn_id))
+                .and_then(|turn| {
+                    turn.items
+                        .iter()
+                        .find(|existing| existing.id() == item.id())
+                });
+            if let Some(existing) = existing
+                && let ThreadItem::McpToolCall {
+                    external_executor, ..
+                } = &item
+            {
+                let source = external_executor.clone();
+                item = existing.clone();
+                if let ThreadItem::McpToolCall {
+                    external_executor, ..
+                } = &mut item
+                {
+                    *external_executor = source;
+                }
+            }
+        }
+        self.upsert_item_in_turn_id(turn_id, item);
     }
 
     fn handle_user_message(&mut self, payload: &UserMessageEvent) {
@@ -640,6 +838,7 @@ impl ThreadHistoryBuilder {
             | codex_protocol::items::TurnItem::FunctionCallOutput(_)
             | codex_protocol::items::TurnItem::CommandExecution(_)
             | codex_protocol::items::TurnItem::DynamicToolCall(_)
+            | codex_protocol::items::TurnItem::McpToolCall(_)
             | codex_protocol::items::TurnItem::CollabAgentToolCall(_)
             | codex_protocol::items::TurnItem::SubAgentActivity(_)
             | codex_protocol::items::TurnItem::Extension(_)
@@ -652,12 +851,28 @@ impl ThreadHistoryBuilder {
             | codex_protocol::items::TurnItem::ImageView(_)
             | codex_protocol::items::TurnItem::ImageGeneration(_)
             | codex_protocol::items::TurnItem::FileChange(_)
-            | codex_protocol::items::TurnItem::McpToolCall(_)
             | codex_protocol::items::TurnItem::ContextCompaction(_) => false,
         };
 
         if should_upsert {
-            let item = ThreadItem::from(item.clone());
+            let mut item = ThreadItem::from(item.clone());
+            if let Some((_, call, materialized)) = self.external_tool_calls.get_mut(item.id()) {
+                *materialized = true;
+                if call
+                    .metadata
+                    .as_ref()
+                    .is_some_and(|metadata| metadata.external_executor_tool.is_some())
+                    && let Some(ThreadItem::McpToolCall {
+                        external_executor: source,
+                        ..
+                    }) = project_external_tool_call(call, None)
+                    && let ThreadItem::McpToolCall {
+                        external_executor, ..
+                    } = &mut item
+                {
+                    *external_executor = source;
+                }
+            }
             if is_review_mode_item {
                 self.upsert_review_mode_item(Some(turn_id), item);
             } else {
@@ -819,6 +1034,7 @@ impl ThreadHistoryBuilder {
             read_only_hint: payload.read_only_hint,
             result: None,
             error: None,
+            external_executor: None,
             duration_ms: None,
         };
         if payload.turn_id.is_empty() {
@@ -877,6 +1093,7 @@ impl ThreadHistoryBuilder {
             read_only_hint: payload.read_only_hint,
             result,
             error,
+            external_executor: None,
             duration_ms,
         };
         if payload.turn_id.is_empty() {
@@ -3250,6 +3467,7 @@ mod tests {
                 error: Some(McpToolCallError {
                     message: "boom".into(),
                 }),
+                external_executor: None,
                 duration_ms: Some(8),
             }
         );
@@ -3334,6 +3552,7 @@ mod tests {
                     })),
                 })),
                 error: None,
+                external_executor: None,
                 duration_ms: Some(8),
             }
         );

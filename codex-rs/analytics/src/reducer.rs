@@ -4078,6 +4078,7 @@ mod tests {
                             read_only_hint: None,
                             result: None,
                             error: None,
+                            external_executor: None,
                             duration_ms: None,
                         },
                     },

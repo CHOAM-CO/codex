@@ -2,6 +2,7 @@
 
 use crate::session::new_submission_id;
 use crate::session::session::Session;
+use codex_history::{CodexHarnessMetadata, RealtimeTranscriptTailSource, ResponseItemEnvelope};
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::protocol::EventMsg;
@@ -18,7 +19,11 @@ use std::sync::Arc;
     clippy::await_holding_invalid_type,
     reason = "record history before the owning task can finish or a new task can start"
 )]
-pub(super) async fn record(session: &Session, text: String) -> std::io::Result<()> {
+pub(super) async fn record(
+    session: &Session,
+    realtime_submission_id: String,
+    text: String,
+) -> std::io::Result<()> {
     let mut recording_context = session.new_inject_items_context().await;
     Arc::get_mut(&mut recording_context)
         .ok_or_else(|| std::io::Error::other("realtime transcript context is shared"))?
@@ -46,23 +51,45 @@ pub(super) async fn record(session: &Session, text: String) -> std::io::Result<(
             collaboration_mode_kind: turn.mode(),
         });
         session
-            .persist_rollout_items(&[RolloutItem::EventMsg(started)])
-            .await;
+            .try_persist_rollout_items(&[RolloutItem::EventMsg(started)])
+            .await?;
         session
             .record_started_turn(&turn.sub_id, /*attribution*/ None)
             .await;
     }
-    let item = session.response_item_from_user_input(content.clone());
+    let mut item = session.response_item_from_user_input(content.clone());
+    Session::assign_missing_response_item_id(&mut item);
+    let item_id = item
+        .id()
+        .expect("transcript response item has an ID")
+        .to_string();
+    let order = session.reserve_user_input_order().await;
     session
-        .record_conversation_items(&turn, turn.model_info(), &[item])
-        .await;
+        .record_realtime_transcript_item(
+            &turn,
+            ResponseItemEnvelope {
+                item,
+                metadata: Some(CodexHarnessMetadata {
+                    user_input_order: Some(order),
+                    realtime_transcript_tail: Some(RealtimeTranscriptTailSource {
+                        thread_id: session.thread_id,
+                        turn_id: turn.sub_id.clone(),
+                        realtime_submission_id,
+                    }),
+                    ..Default::default()
+                }),
+            },
+        )
+        .await?;
 
     // ItemCompleted is the existing source for thread/items/list. Keep the legacy
     // equivalent too; the store selects the appropriate format for this thread.
+    let mut user_item = UserMessageItem::new(&content);
+    user_item.id = item_id;
     let completed = EventMsg::ItemCompleted(ItemCompletedEvent {
         thread_id: session.thread_id,
         turn_id: turn.sub_id.clone(),
-        item: TurnItem::UserMessage(UserMessageItem::new(&content)),
+        item: TurnItem::UserMessage(user_item),
         started_at_ms: Some(now.timestamp_millis()),
         completed_at_ms: now.timestamp_millis(),
     });
@@ -85,13 +112,13 @@ pub(super) async fn record(session: &Session, text: String) -> std::io::Result<(
     // Persist the complete history record without advertising a running UI turn
     // or completing the model task that may still be streaming.
     session
-        .persist_rollout_items(
+        .try_persist_rollout_items(
             &events
                 .into_iter()
                 .map(RolloutItem::EventMsg)
                 .collect::<Vec<_>>(),
         )
-        .await;
+        .await?;
     drop(active);
     session
         .try_ensure_rollout_materialized(PersistContext::Standard)

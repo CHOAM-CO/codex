@@ -588,6 +588,15 @@ impl RealtimeConversationManager {
             .and_then(|state| state.realtime_active.load(Ordering::Relaxed).then_some(()))
     }
 
+    pub(crate) async fn current_submission_id(&self) -> Option<String> {
+        self.state
+            .lock()
+            .await
+            .conversation
+            .as_ref()
+            .map(|state| state.sub_id.clone())
+    }
+
     pub(crate) async fn is_running_v2(&self) -> bool {
         let state = self.state.lock().await;
         matches!(
@@ -1829,7 +1838,11 @@ async fn handle_start_inner(
             if let Some(text) = maybe_routed_text {
                 // The routed text can contain spoken prompts or workspace secrets.
                 debug!("[realtime-text] realtime conversation text output");
-                handoff_error = route_handoffs.route(&sess_clone, text).await.err();
+                handoff_error = route_handoffs
+                    .route(&sess_clone, text)
+                    .await
+                    .err()
+                    .map(str::to_owned);
             }
             sess_clone
                 .send_event_raw(ev(EventMsg::RealtimeConversationRealtime(
@@ -1847,10 +1860,12 @@ async fn handle_start_inner(
         {
             let _permit = route_handoffs.gate.acquire().await;
             if !route_handoffs.retired.load(Ordering::Acquire)
-                && let Err(err) = transcript_tail::record(&sess_clone, text).await
+                && let Err(err) = transcript_tail::record(&sess_clone, sub_id.clone(), text).await
             {
                 warn!("failed to flush realtime transcript before closure: {err}");
-                handoff_error = Some("failed to save the realtime transcript before closure");
+                handoff_error = Some(format!(
+                    "failed to save the realtime transcript before closure: {err}"
+                ));
             }
         }
         // Make realtime_end eligible only after the tail has reached history.
@@ -2096,6 +2111,7 @@ fn spawn_realtime_input_task(
 
 enum RealtimeInputTaskExit {
     Terminal,
+    Failed(String),
     TransportLost {
         err: ApiError,
         pending_outbound: Option<Box<RealtimePendingOutbound>>,
@@ -2161,7 +2177,11 @@ async fn run_realtime_input_task(
         )
         .await
     {
-        return classify_realtime_input_error_with_pending(err, Some(pending_outbound));
+        let exit = classify_realtime_input_error_with_pending(err, Some(pending_outbound));
+        if let RealtimeInputTaskExit::Failed(message) = &exit {
+            let _ = events_tx.send(RealtimeEvent::Error(message.clone())).await;
+        }
+        return exit;
     }
 
     loop {
@@ -2234,6 +2254,9 @@ async fn run_realtime_input_task(
             }
         };
         if let Err(exit) = result {
+            if let RealtimeInputTaskExit::Failed(message) = &exit {
+                let _ = events_tx.send(RealtimeEvent::Error(message.clone())).await;
+            }
             break exit;
         }
     }
@@ -2254,7 +2277,7 @@ fn classify_realtime_input_error_with_pending(
         },
         Err(err) => {
             warn!("realtime input task stopped: {err}");
-            RealtimeInputTaskExit::Terminal
+            RealtimeInputTaskExit::Failed(format!("{err:#}"))
         }
     }
 }

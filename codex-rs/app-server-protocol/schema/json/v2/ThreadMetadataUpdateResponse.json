@@ -1771,6 +1771,9 @@
                 }
               ]
             },
+            "externalExecutor": {
+              "description": "Original external executor state and source references, when available."
+            },
             "id": {
               "type": "string"
             },

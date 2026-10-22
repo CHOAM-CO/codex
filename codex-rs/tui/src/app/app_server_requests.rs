@@ -1028,9 +1028,9 @@ mod tests {
         let mut pending = PendingAppServerRequests::default();
         let request: ServerRequest = serde_json::from_value(json!({
             "id":101, "method":"turn/external/run", "params":{
-                "threadId":"thread-1", "turnId":"turn-1", "executor":"antigravity",
+                "threadId":"thread-1", "turnId":"turn-1", "runId":"run-1", "executor":"antigravity",
                 "model":"external-model", "cwd":"/workspace", "instructions":"",
-                "effort":null, "input":[], "fullHistory":true
+                "effort":null, "input":[], "contextUpdates":[]
             }
         }))
         .expect("external request");

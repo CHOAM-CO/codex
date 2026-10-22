@@ -1446,8 +1446,11 @@ class ToolExternalExecutorEvent(BaseModel):
     )
     arguments: Any
     call_id: Annotated[str, Field(alias="callId")]
+    error: Any | None = None
     name: str
-    output: Any
+    output: Any | None = None
+    source: Any | None = None
+    status: str | None = None
     type: Annotated[Literal["tool"], Field(title="ToolExternalExecutorEventType")]
 
 
@@ -5521,6 +5524,13 @@ class McpToolCallThreadItem(BaseModel):
         Field(alias="durationMs", description="The duration of the MCP tool call in milliseconds."),
     ] = None
     error: McpToolCallError | None = None
+    external_executor: Annotated[
+        Any | None,
+        Field(
+            alias="externalExecutor",
+            description="Original external executor state and source references, when available.",
+        ),
+    ] = None
     id: str
     mcp_app_resource_uri: Annotated[
         str | None,
@@ -12169,17 +12179,35 @@ class ExternalAgentConfigImportParams(BaseModel):
     ] = None
 
 
+class ExternalExecutorContextUpdate(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    item: ResponseItem
+    item_id: Annotated[str, Field(alias="itemId")]
+    order: Annotated[int, Field(ge=0)]
+    thread_id: Annotated[str, Field(alias="threadId")]
+    turn_id: Annotated[str, Field(alias="turnId")]
+
+
 class ExternalExecutorRunParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    context_updates: Annotated[
+        list[ExternalExecutorContextUpdate],
+        Field(
+            alias="contextUpdates",
+            description="Host-authored local context saved without starting an inference turn.",
+        ),
+    ]
     cwd: str
     effort: str | None = None
     executor: ModelExecutor
-    full_history: Annotated[bool, Field(alias="fullHistory")]
     input: list[ResponseItem]
     instructions: str
     model: str
+    parent_thread_id: Annotated[str | None, Field(alias="parentThreadId")] = None
     run_id: Annotated[str, Field(alias="runId")]
     thread_id: Annotated[str, Field(alias="threadId")]
     turn_id: Annotated[str, Field(alias="turnId")]

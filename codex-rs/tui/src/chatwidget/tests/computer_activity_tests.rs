@@ -22,6 +22,7 @@ fn computer_item(
             meta: None,
         })),
         error: None,
+        external_executor: None,
         duration_ms: Some(5),
     }
 }

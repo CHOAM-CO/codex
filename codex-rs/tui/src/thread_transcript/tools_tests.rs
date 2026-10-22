@@ -53,6 +53,7 @@ fn mcp_item(server: &str, id: &str) -> ThreadItem {
             meta: None,
         })),
         error: None,
+        external_executor: None,
         duration_ms: Some(5),
     }
 }

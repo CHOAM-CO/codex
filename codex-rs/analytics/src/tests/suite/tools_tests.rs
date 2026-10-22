@@ -709,6 +709,7 @@ async fn mcp_elicitation_classification_survives_turn_completion_and_preserves_c
             read_only_hint: None,
             result: None,
             error: None,
+            external_executor: None,
             duration_ms: Some(2),
         };
         reducer

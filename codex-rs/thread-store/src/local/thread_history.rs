@@ -9,6 +9,7 @@ use super::LocalThreadStore;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
 
+mod external_tools;
 mod read;
 mod realtime;
 mod search;

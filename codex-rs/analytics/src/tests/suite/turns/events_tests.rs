@@ -492,6 +492,7 @@ async fn turn_event_counts_completed_tool_items() {
         read_only_hint: None,
         result: None,
         error: None,
+        external_executor: None,
         duration_ms,
     };
     let completed_tool_items = vec![

@@ -113,6 +113,7 @@ fn mcp_tool_call_result_preserves_meta_in_jsonl_event() {
                     meta: Some(json!({"raw_messages": [{"ref_id": "turn0search0"}]})),
                 })),
                 error: None,
+                external_executor: None,
                 duration_ms: Some(42),
             },
             thread_id: "thread-1".to_string(),

@@ -8,6 +8,23 @@ use codex_protocol::protocol::RealtimeEvent;
 use codex_protocol::realtime::RealtimeItemContent;
 
 impl Session {
+    pub(super) async fn report_realtime_history_failure(
+        &self,
+        submission_id: &str,
+        error: &anyhow::Error,
+    ) {
+        // The reducer lock is held by the caller; deliver this warning without re-entering it.
+        let message = format!("failed to persist realtime history: {error:#}");
+        let warning = EventMsg::Warning(codex_protocol::protocol::WarningEvent { message });
+        self.persist_rollout_items(&[RolloutItem::EventMsg(warning.clone())])
+            .await;
+        self.deliver_event_raw(Event {
+            id: submission_id.to_owned(),
+            msg: warning,
+        })
+        .await;
+    }
+
     pub(super) async fn send_realtime_history_effects(
         &self,
         submission_id: &str,
@@ -42,7 +59,13 @@ impl Session {
                     .map(RolloutItem::RealtimeItem)
                     .collect::<Vec<_>>(),
             )
-            .await?;
+            .await
+            .map_err(|error| {
+                anyhow::Error::new(error).context(format!(
+                    "realtime session {}",
+                    effects.items[0].realtime_session_id
+                ))
+            })?;
         for item in effects.items {
             if !matches!(&item.content, RealtimeItemContent::TranscriptSegment { .. }) {
                 self.deliver_event_raw(event(RealtimeEvent::HistoryItemStarted(item.clone())))

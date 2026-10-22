@@ -7684,6 +7684,35 @@
       ],
       "type": "string"
     },
+    "ExternalExecutorContextUpdate": {
+      "properties": {
+        "item": {
+          "$ref": "#/definitions/ResponseItem"
+        },
+        "itemId": {
+          "type": "string"
+        },
+        "order": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "item",
+        "itemId",
+        "order",
+        "threadId",
+        "turnId"
+      ],
+      "type": "object"
+    },
     "ExternalExecutorEvent": {
       "oneOf": [
         {
@@ -7707,16 +7736,24 @@
           "type": "object"
         },
         {
-          "description": "A completed call executed by the external engine's own built-in tools.",
+          "description": "A call observed from the external engine's own built-in tools.",
           "properties": {
             "arguments": true,
             "callId": {
               "type": "string"
             },
+            "error": true,
             "name": {
               "type": "string"
             },
             "output": true,
+            "source": true,
+            "status": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "type": {
               "enum": [
                 "tool"
@@ -7729,7 +7766,6 @@
             "arguments",
             "callId",
             "name",
-            "output",
             "type"
           ],
           "title": "ToolExternalExecutorEvent",
@@ -7770,6 +7806,13 @@
     "ExternalExecutorRunParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
+        "contextUpdates": {
+          "description": "Host-authored local context saved without starting an inference turn.",
+          "items": {
+            "$ref": "#/definitions/ExternalExecutorContextUpdate"
+          },
+          "type": "array"
+        },
         "cwd": {
           "type": "string"
         },
@@ -7781,9 +7824,6 @@
         },
         "executor": {
           "$ref": "#/definitions/ModelExecutor"
-        },
-        "fullHistory": {
-          "type": "boolean"
         },
         "input": {
           "items": {
@@ -7797,6 +7837,12 @@
         "model": {
           "type": "string"
         },
+        "parentThreadId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "runId": {
           "type": "string"
         },
@@ -7808,9 +7854,9 @@
         }
       },
       "required": [
+        "contextUpdates",
         "cwd",
         "executor",
-        "fullHistory",
         "input",
         "instructions",
         "model",
@@ -20526,6 +20572,9 @@
                   "type": "null"
                 }
               ]
+            },
+            "externalExecutor": {
+              "description": "Original external executor state and source references, when available."
             },
             "id": {
               "type": "string"

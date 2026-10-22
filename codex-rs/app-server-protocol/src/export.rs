@@ -2594,7 +2594,7 @@ mod tests {
         )?;
         let definitions = &bundle["definitions"];
         let params = &definitions["ExternalExecutorRunParams"];
-        assert_eq!(params["properties"]["fullHistory"]["type"], "boolean");
+        assert_eq!(params["properties"]["contextUpdates"]["type"], "array");
         assert_eq!(params["properties"]["threadId"]["type"], "string");
         assert_eq!(params["properties"]["runId"]["type"], "string");
         assert!(

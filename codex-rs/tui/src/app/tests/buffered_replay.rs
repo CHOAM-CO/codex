@@ -662,6 +662,7 @@ async fn misalignment_buffered_replay_preserves_input_after_continuation() {
             read_only_hint: None,
             result: None,
             error: None,
+            external_executor: None,
             duration_ms: None,
         }],
         ..test_turn("failed-turn", TurnStatus::Failed, Vec::new())

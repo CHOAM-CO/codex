@@ -80,6 +80,7 @@ mod tests {
 
         assert_roundtrip::<ExternalExecutorRunParams>(json!({
             "threadId": "thread-fixture",
+            "parentThreadId": null,
             "turnId": "turn-fixture",
             "runId": "run-fixture",
             "executor": "antigravity",
@@ -88,7 +89,7 @@ mod tests {
             "instructions": "Inspect the task context",
             "effort": null,
             "input": [],
-            "fullHistory": false
+            "contextUpdates": []
         }));
         assert_roundtrip::<ExternalExecutorEventParams>(json!({
             "threadId": "thread-fixture",

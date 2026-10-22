@@ -351,6 +351,10 @@ pub enum ThreadItem {
         read_only_hint: Option<bool>,
         result: Option<Box<McpToolCallResult>>,
         error: Option<McpToolCallError>,
+        /// Original external executor state and source references, when available.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        external_executor: Option<JsonValue>,
         /// The duration of the MCP tool call in milliseconds.
         #[ts(type = "number | null")]
         duration_ms: Option<i64>,
@@ -1058,6 +1062,7 @@ impl From<CoreTurnItem> for ThreadItem {
                     read_only_hint: mcp.read_only_hint,
                     result: mcp.result.map(McpToolCallResult::from).map(Box::new),
                     error: mcp.error.map(McpToolCallError::from),
+                    external_executor: None,
                     duration_ms,
                 }
             }

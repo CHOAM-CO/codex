@@ -92,6 +92,7 @@ async fn older_tool_projection_matches_initial_replay() {
                 meta: None,
             })),
             error: None,
+            external_executor: None,
             duration_ms: Some(5),
         });
     }

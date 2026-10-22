@@ -720,14 +720,14 @@ pub(crate) async fn record_pending_input(
     pending_input: TurnInput,
     additional_contexts: Vec<String>,
     persist_context: PersistContext,
-) {
-    match pending_input {
+) -> Vec<ResponseItem> {
+    let mut recorded = match pending_input {
         TurnInput::UserInput {
             content,
             client_id,
             metadata,
         } => {
-            sess.record_user_prompt_and_emit_turn_item(
+            sess.record_user_prompt_and_emit_turn_item_and_collect(
                 turn_context.as_ref(),
                 model_info,
                 content.as_slice(),
@@ -735,14 +735,23 @@ pub(crate) async fn record_pending_input(
                 metadata,
                 persist_context,
             )
-            .await;
+            .await
         }
         TurnInput::ResponseItem(item) => {
-            sess.record_annotated_conversation_items(turn_context, model_info, vec![item])
-                .await;
+            sess.record_annotated_conversation_items_and_collect(
+                turn_context,
+                model_info,
+                vec![item],
+            )
+            .await
         }
         TurnInput::FunctionCallOutput(item) => {
-            sess.record_annotated_conversation_items(turn_context, model_info, vec![item.clone()])
+            let recorded = sess
+                .record_annotated_conversation_items_and_collect(
+                    turn_context,
+                    model_info,
+                    vec![item.clone()],
+                )
                 .await;
             if let ResponseItem::FunctionCallOutput {
                 id: Some(id),
@@ -762,14 +771,24 @@ pub(crate) async fn record_pending_input(
                 sess.emit_turn_item_completed(turn_context, item).await;
             }
             sess.ensure_rollout_materialized(persist_context).await;
+            recorded
         }
         TurnInput::InterAgentCommunication(communication) => {
-            sess.record_inter_agent_communication(turn_context, model_info, communication)
+            let recorded = sess
+                .record_inter_agent_communication_and_collect(
+                    turn_context,
+                    model_info,
+                    communication,
+                )
                 .await;
             sess.ensure_rollout_materialized(persist_context).await;
+            recorded
         }
-    }
-    record_additional_contexts(sess, turn_context, additional_contexts).await;
+    };
+    recorded.extend(
+        record_additional_contexts_and_collect(sess, turn_context, additional_contexts).await,
+    );
+    recorded
 }
 
 /// Processes finished async hook results at a safe turn boundary.
@@ -851,17 +870,25 @@ pub(crate) async fn record_additional_contexts(
     turn_context: &Arc<TurnContext>,
     additional_contexts: Vec<String>,
 ) {
+    record_additional_contexts_and_collect(sess, turn_context, additional_contexts).await;
+}
+
+pub(crate) async fn record_additional_contexts_and_collect(
+    sess: &Arc<Session>,
+    turn_context: &Arc<TurnContext>,
+    additional_contexts: Vec<String>,
+) -> Vec<ResponseItem> {
     let developer_messages = additional_context_messages(additional_contexts);
     if developer_messages.is_empty() {
-        return;
+        return Vec::new();
     }
 
-    sess.record_conversation_items(
+    sess.record_conversation_items_and_collect(
         turn_context,
         turn_context.model_info(),
         developer_messages.as_slice(),
     )
-    .await;
+    .await
 }
 
 fn additional_context_messages(additional_contexts: Vec<String>) -> Vec<ResponseItem> {

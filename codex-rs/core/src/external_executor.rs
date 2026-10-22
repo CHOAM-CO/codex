@@ -3,17 +3,26 @@ use crate::CodexThread;
 use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
-use crate::session::turn::run_hooks_and_record_inputs;
+use crate::session::turn::run_hooks_and_record_inputs_and_collect;
 use crate::session::turn_context::TurnContext;
 use crate::tools::parallel::ToolCallRuntime;
 use crate::turn_diff_tracker::TurnDiffTracker;
+use codex_history::{
+    CodexHarnessMetadata, ExternalExecutorToolMetadata, ResponseItemEnvelope, RolloutItem,
+};
 use codex_protocol::error::{CodexErr, Result};
 use codex_protocol::external_executor::{
-    ExternalExecutorEvent, ExternalExecutorRunParams, ExternalExecutorRunResponse,
+    ExternalExecutorContextUpdate, ExternalExecutorEvent, ExternalExecutorRunParams,
+    ExternalExecutorRunResponse,
 };
-use codex_protocol::items::{AgentMessageContent, AgentMessageItem, TurnItem};
+use codex_protocol::items::{
+    AgentMessageContent, AgentMessageItem, McpToolCallError, McpToolCallItem, McpToolCallStatus,
+    TurnItem,
+};
+use codex_protocol::mcp::CallToolResult;
 use codex_protocol::models::{ContentItem, FunctionCallOutputPayload, MessagePhase, ResponseItem};
 use codex_protocol::protocol::{AgentMessageContentDeltaEvent, EventMsg};
+use codex_thread_store::LoadThreadHistoryParams;
 use codex_thread_store::PersistContext;
 use codex_tools::ToolName;
 use std::sync::Arc;
@@ -105,17 +114,21 @@ pub(crate) async fn run_external_turn(
     session
         .record_context_updates_and_set_reference_context_item(&step)
         .await?;
-    if run_hooks_and_record_inputs(
+    let (blocked, accepted_input) = run_hooks_and_record_inputs_and_collect(
         &session,
         &turn,
         &step.settings.model_info,
         &input,
         PersistContext::Standard,
     )
-    .await
-    {
+    .await;
+    if blocked {
         return Ok(None);
     }
+    // Tail recording never starts a task. Read its durable originals at the native run
+    // boundary after the normal input hooks and preparation path.
+    let context_updates = session.external_context_updates().await?;
+    let instructions = session.external_executor_instructions(&step).await;
     let runtime = ToolCallRuntime::new(
         Arc::clone(&session),
         Arc::clone(&step),
@@ -134,23 +147,21 @@ pub(crate) async fn run_external_turn(
         state.external_tool_runtime = Some(runtime);
         state.external_cancellation = Some(request_cancel);
     }
-    let history = session.conversation_history_snapshot().await;
     session
         .send_event(
             &turn,
             EventMsg::ExternalExecutorRequest(ExternalExecutorRunParams {
                 thread_id: session.thread_id.to_string(),
+                parent_thread_id: turn.parent_thread_id.map(|id| id.to_string()),
                 turn_id: turn.sub_id.clone(),
                 run_id: id.clone(),
                 executor: turn.config.model_executor,
                 model: step.settings.model_info.slug.clone(),
                 cwd: turn.config.cwd.to_string_lossy().into_owned(),
-                full_history: true,
-                input: codex_protocol::provider_history::without_encrypted_content(
-                    &history.items().cloned().collect::<Vec<_>>(),
-                )
-                .items,
-                instructions: session.get_prompt_base_instructions().await.text,
+                input: codex_protocol::provider_history::without_encrypted_content(&accepted_input)
+                    .items,
+                context_updates,
+                instructions,
                 effort: step
                     .settings
                     .effective_reasoning_effort()
@@ -197,24 +208,114 @@ pub(crate) async fn run_external_turn(
                 name,
                 arguments,
                 output,
+                error,
+                status,
+                source,
             }) => {
-                let call = function_call(
+                let mut call = function_call(
                     call_id.clone(),
                     Some("antigravity".into()),
                     name.clone(),
                     arguments.to_string(),
                 );
-                let result = ResponseItem::FunctionCallOutput {
-                    id: None,
-                    call_id: Some(call_id),
-                    name: Some(name),
-                    namespace: Some("antigravity".into()),
-                    output: FunctionCallOutputPayload::from_text(output.to_string()),
-                    internal_chat_message_metadata_passthrough: None,
+                call.set_id(Some(codex_protocol::ResponseItemId::from_server(
+                    call_id.clone(),
+                )));
+                if let ResponseItem::FunctionCall {
+                    status: call_status,
+                    ..
+                } = &mut call
+                {
+                    *call_status = status.clone();
+                }
+                let received = ExternalExecutorToolMetadata {
+                    output: output.clone(),
+                    error: error.clone(),
+                    status: status.clone(),
+                    source,
                 };
+                let metadata = Some(CodexHarnessMetadata {
+                    external_executor_tool: Some(received.clone()),
+                    ..Default::default()
+                });
+                let mut items = vec![ResponseItemEnvelope {
+                    item: call,
+                    metadata: metadata.clone(),
+                }];
+                if output.is_some() || error.is_some() {
+                    items.push(ResponseItemEnvelope {
+                        item: ResponseItem::FunctionCallOutput {
+                            id: None,
+                            call_id: Some(call_id.clone()),
+                            name: Some(name.clone()),
+                            namespace: Some("antigravity".into()),
+                            output: FunctionCallOutputPayload::from_text(
+                                serde_json::to_string(&received)
+                                    .expect("external tool observation is JSON"),
+                            ),
+                            internal_chat_message_metadata_passthrough: None,
+                        },
+                        metadata,
+                    });
+                }
                 session
-                    .record_conversation_items(&turn, &step.settings.model_info, &[call, result])
+                    .record_annotated_conversation_items(&turn, &step.settings.model_info, items)
                     .await;
+                let failed = error.is_some()
+                    || status.as_deref().is_some_and(|status| {
+                        matches!(
+                            status.to_ascii_lowercase().as_str(),
+                            "error" | "failed" | "failure" | "cancelled" | "canceled"
+                        )
+                    });
+                let completed = failed
+                    || output.is_some()
+                    || status.as_deref().is_some_and(|status| {
+                        matches!(
+                            status.to_ascii_lowercase().as_str(),
+                            "done" | "completed" | "complete" | "success" | "succeeded"
+                        )
+                    });
+                let item = TurnItem::McpToolCall(McpToolCallItem {
+                    id: call_id,
+                    server: "antigravity".into(),
+                    tool: name,
+                    arguments,
+                    connector_id: None,
+                    mcp_app_resource_uri: None,
+                    mcp_app_ui: None,
+                    link_id: None,
+                    app_name: None,
+                    action_name: None,
+                    plugin_id: None,
+                    read_only_hint: None,
+                    status: if failed {
+                        McpToolCallStatus::Failed
+                    } else if completed {
+                        McpToolCallStatus::Completed
+                    } else {
+                        McpToolCallStatus::InProgress
+                    },
+                    result: output.map(|output| CallToolResult {
+                        content: vec![
+                            serde_json::json!({ "type": "text", "text": output.to_string() }),
+                        ],
+                        structured_content: Some(
+                            serde_json::to_value(&received)
+                                .expect("external tool observation is JSON"),
+                        ),
+                        is_error: None,
+                        meta: None,
+                    }),
+                    error: error.map(|error| McpToolCallError {
+                        message: error.to_string(),
+                    }),
+                    duration: None,
+                });
+                session.emit_turn_item_started(&turn, &item).await;
+                if completed {
+                    session.emit_turn_item_completed(&turn, item).await;
+                }
             }
             ExternalMessage::Complete(result) => {
                 if started {
@@ -240,6 +341,52 @@ pub(crate) async fn run_external_turn(
 }
 
 impl Session {
+    async fn external_context_updates(&self) -> Result<Vec<ExternalExecutorContextUpdate>> {
+        // Ephemeral sessions have no durable local transcript source to forward.
+        if self.live_thread().is_none() {
+            return Ok(Vec::new());
+        }
+        self.try_ensure_rollout_materialized(PersistContext::Standard)
+            .await?;
+        self.flush_rollout().await?;
+        let history = self
+            .services
+            .thread_store
+            .load_history(LoadThreadHistoryParams {
+                thread_id: self.thread_id,
+                include_archived: false,
+            })
+            .await
+            .map_err(|err| CodexErr::Fatal(err.to_string()))?;
+        let mut updates = Vec::new();
+        for item in history.items {
+            let RolloutItem::ResponseItem(envelope) = item else {
+                continue;
+            };
+            let Some(metadata) = envelope.metadata.as_ref() else {
+                continue;
+            };
+            let Some(source) = metadata.realtime_transcript_tail.as_ref() else {
+                continue;
+            };
+            if source.thread_id != self.thread_id || metadata.inherited_user_message {
+                continue;
+            }
+            let (Some(id), Some(order)) = (envelope.item.id(), metadata.user_input_order) else {
+                continue;
+            };
+            updates.push(ExternalExecutorContextUpdate {
+                item_id: id.to_string(),
+                thread_id: source.thread_id.to_string(),
+                turn_id: source.turn_id.clone(),
+                order,
+                item: external_tool_output_view(&envelope.item),
+            });
+        }
+        updates.sort_by_key(|item| item.order);
+        Ok(updates)
+    }
+
     async fn external_context(
         &self,
         turn_id: &str,
@@ -558,7 +705,7 @@ mod tests {
             .await;
         let request = next_request(&rx).await;
         assert_eq!(request.executor, ModelExecutor::Antigravity);
-        assert!(request.full_history);
+        assert!(request.context_updates.is_empty());
         assert_eq!(request.turn_id, turn.sub_id);
         (session, turn, rx, request.run_id)
     }
@@ -790,7 +937,10 @@ mod tests {
                     call_id: "stale-built-in-call".into(),
                     name: "read_file".into(),
                     arguments: json!({"path":"stale.md"}),
-                    output: json!({"text":"stale result"}),
+                    output: Some(json!({"text":"stale result"})),
+                    error: None,
+                    status: None,
+                    source: None,
                 },
             ] {
                 assert!(
@@ -861,7 +1011,10 @@ mod tests {
                         call_id: "current-built-in-call".into(),
                         name: "read_file".into(),
                         arguments: arguments.clone(),
-                        output: output.clone(),
+                        output: Some(output.clone()),
+                        error: None,
+                        status: None,
+                        source: None,
                     },
                 )
                 .await
@@ -928,7 +1081,9 @@ mod tests {
                     call_id: Some("current-built-in-call".into()),
                     name: Some("read_file".into()),
                     namespace: Some("antigravity".into()),
-                    output: FunctionCallOutputPayload::from_text(output.to_string()),
+                    output: FunctionCallOutputPayload::from_text(
+                        json!({"output": output}).to_string(),
+                    ),
                     internal_chat_message_metadata_passthrough: None,
                 },
             ];

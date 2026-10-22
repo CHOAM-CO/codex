@@ -79,6 +79,10 @@ mcpAppResourceUri?: string,
  */
 mcpAppUi: McpAppUi | null, pluginId: string | null, readOnlyHint: boolean | null, result: McpToolCallResult | null, error: McpToolCallError | null,
 /**
+ * Original external executor state and source references, when available.
+ */
+externalExecutor?: JsonValue,
+/**
  * The duration of the MCP tool call in milliseconds.
  */
 durationMs: number | null, } | { "type": "dynamicToolCall", id: string, namespace: string | null, tool: string, arguments: JsonValue, status: DynamicToolCallStatus, contentItems: Array<DynamicToolCallOutputContentItem> | null, success: boolean | null,

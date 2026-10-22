@@ -21,9 +21,11 @@ pub(super) fn redact_thread_resume_payloads(turns: &mut [Turn]) {
                 arguments,
                 result,
                 error,
+                external_executor,
                 ..
             } => {
                 *arguments = JsonValue::String(REDACTED_PAYLOAD.to_string());
+                *external_executor = None;
                 if result.is_some() {
                     *result = Some(Box::new(redacted_mcp_tool_call_result()));
                 }
@@ -102,6 +104,7 @@ mod tests {
                     meta: Some(serde_json::json!({"secret":"meta"})),
                 })),
                 error: None,
+                external_executor: None,
                 duration_ms: Some(8),
             },
             ThreadItem::ImageGeneration(ImageGenerationItem {
@@ -152,6 +155,7 @@ mod tests {
                 read_only_hint: None,
                 result: Some(Box::new(redacted_mcp_tool_call_result())),
                 error: None,
+                external_executor: None,
                 duration_ms: Some(8),
             }
         );
@@ -174,6 +178,7 @@ mod tests {
             error: Some(McpToolCallError {
                 message: "secret error".to_string(),
             }),
+            external_executor: None,
             duration_ms: Some(8),
         }]);
 
@@ -196,6 +201,7 @@ mod tests {
                 error: Some(McpToolCallError {
                     message: REDACTED_PAYLOAD.to_string(),
                 }),
+                external_executor: None,
                 duration_ms: Some(8),
             }
         );
