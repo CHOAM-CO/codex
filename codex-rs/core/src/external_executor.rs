@@ -8,7 +8,7 @@ use crate::session::turn_context::TurnContext;
 use crate::tools::parallel::ToolCallRuntime;
 use crate::turn_diff_tracker::TurnDiffTracker;
 use codex_history::{
-    CodexHarnessMetadata, ExternalExecutorToolMetadata, ResponseItemEnvelope, RolloutItem,
+    CodexHarnessMetadata, ExternalExecutorToolMetadata, ResponseItemEnvelope,
 };
 use codex_protocol::error::{CodexErr, Result};
 use codex_protocol::external_executor::{

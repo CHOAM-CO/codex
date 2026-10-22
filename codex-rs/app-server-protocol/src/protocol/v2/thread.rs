@@ -300,7 +300,17 @@ pub struct ThreadSettingsUpdateParams {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
-pub struct ThreadSettingsUpdateResponse {}
+pub struct ThreadSettingsUpdateResponse {
+    /// The thread whose settings operation completed. Omitted by older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub thread_id: Option<String>,
+    /// Effective settings after Core accepted the update, including normalized values.
+    /// Omitted by older servers that only acknowledge queueing the update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub thread_settings: Option<ThreadSettings>,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
 #[serde(rename_all = "camelCase")]

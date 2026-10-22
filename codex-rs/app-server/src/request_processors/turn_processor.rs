@@ -826,9 +826,8 @@ impl TurnRequestProcessor {
         let collaboration_mode =
             collaboration_mode.map(|mode| self.normalize_collaboration_mode(mode));
         let has_environment_override = environment_requests.is_some();
-        // `thread/settings/update` only acknowledges that the update was queued.
-        // Clients that send dependent partial updates should wait for
-        // `thread/settings/updated` or combine the fields in one request.
+        // Dependent partial updates must be built after the preceding operation
+        // completes, or combined in one request.
         let snapshot = if permissions.is_some() {
             Some(thread.config_snapshot().await)
         } else {
@@ -942,7 +941,7 @@ impl TurnRequestProcessor {
         request_id: &ConnectionRequestId,
         params: ThreadSettingsUpdateParams,
     ) -> Result<ThreadSettingsUpdateResponse, JSONRPCErrorError> {
-        let (_, thread) = self.load_thread(&params.thread_id).await?;
+        let (thread_id, thread) = self.load_thread(&params.thread_id).await?;
         self.ensure_direct_input_allowed(request_id, thread.as_ref())
             .await?;
         let cwd = resolve_request_cwd(params.cwd)?;
@@ -976,19 +975,31 @@ impl TurnRequestProcessor {
             .await?;
 
         if thread_settings != codex_protocol::protocol::ThreadSettingsOverrides::default() {
+            let (reply, outcome) = oneshot::channel();
             self.submit_core_op(
                 request_id,
                 thread.as_ref(),
                 Op::ThreadSettings {
                     thread_settings,
-                    reply: None,
+                    reply: Some(reply),
                 },
             )
             .await
             .map_err(|err| internal_error(format!("failed to update thread settings: {err}")))?;
+            outcome
+                .await
+                .map_err(|_| internal_error("thread settings operation ended before replying"))?
+                .map_err(|err| match err.details() {
+                    CodexErrorDetails::InvalidRequest(message) => invalid_request(message.clone()),
+                    _ => internal_error(format!("failed to update thread settings: {err}")),
+                })?;
         }
 
-        Ok(ThreadSettingsUpdateResponse {})
+        let thread_settings = thread_settings_from_config_snapshot(&thread.config_snapshot().await);
+        Ok(ThreadSettingsUpdateResponse {
+            thread_id: Some(thread_id.to_string()),
+            thread_settings: Some(thread_settings),
+        })
     }
 
     async fn thread_inject_items_response_inner(
