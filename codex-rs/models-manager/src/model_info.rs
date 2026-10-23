@@ -98,6 +98,20 @@ fn is_h1_heading(line: &str) -> bool {
 pub fn model_info_from_slug(slug: &str) -> ModelInfo {
     warn!("Unknown model {slug} is used. This will use fallback model metadata.");
     ModelInfo {
+        supported_in_api: true,
+        supports_reasoning_summary_parameter: true,
+        context_window: Some(272_000),
+        max_context_window: Some(272_000),
+        effective_context_window_percent: 95,
+        used_fallback_model_metadata: true,
+        ..host_tool_model_info(slug)
+    }
+}
+
+/// Shared Codex-owned tool and instruction defaults. These do not advertise
+/// provider API capabilities or assume a model context window.
+pub fn host_tool_model_info(slug: &str) -> ModelInfo {
+    ModelInfo {
         slug: slug.to_string(),
         display_name: slug.to_string(),
         description: None,
@@ -105,7 +119,7 @@ pub fn model_info_from_slug(slug: &str) -> ModelInfo {
         supported_reasoning_levels: Vec::new(),
         shell_type: ConfigShellToolType::UnifiedExec,
         visibility: ModelVisibility::None,
-        supported_in_api: true,
+        supported_in_api: false,
         priority: 99,
         additional_speed_tiers: Vec::new(),
         service_tiers: Vec::new(),
@@ -117,7 +131,7 @@ pub fn model_info_from_slug(slug: &str) -> ModelInfo {
         include_skills_usage_instructions: false,
         include_plugin_usage_instructions: false,
         include_apps_usage_instructions: false,
-        supports_reasoning_summary_parameter: true,
+        supports_reasoning_summary_parameter: false,
         default_reasoning_summary: ReasoningSummary::Auto,
         support_verbosity: false,
         default_verbosity: None,
@@ -125,14 +139,14 @@ pub fn model_info_from_slug(slug: &str) -> ModelInfo {
         web_search_tool_type: WebSearchToolType::Text,
         truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
         supports_image_detail_original: false,
-        context_window: Some(272_000),
-        max_context_window: Some(272_000),
+        context_window: None,
+        max_context_window: None,
         auto_compact_token_limit: None,
         comp_hash: None,
-        effective_context_window_percent: 95,
+        effective_context_window_percent: 100,
         experimental_supported_tools: Vec::new(),
         input_modalities: default_input_modalities(),
-        used_fallback_model_metadata: true, // this is the fallback model metadata
+        used_fallback_model_metadata: false,
         supports_search_tool: false,
         supports_experimental_context: false,
         use_responses_lite: false,

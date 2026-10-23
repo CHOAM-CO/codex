@@ -161,6 +161,19 @@ pub struct FeatureToggleToml {
     pub enabled: Option<bool>,
 }
 
+/// Discovered model metadata supplied by the external harness host.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct ExternalModelMetadata {
+    pub model: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub supported_reasoning_efforts: Vec<ReasoningEffort>,
+    /// Actual harness effort for Codex's Ultra orchestration mode, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub multi_agent_reasoning_effort: Option<ReasoningEffort>,
+}
+
 /// Base config deserialized from ~/.codex/config.toml.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
@@ -176,6 +189,9 @@ pub struct ConfigToml {
     pub model_provider: Option<String>,
     /// Execution backend. Native Codex is the default.
     pub model_executor: Option<ModelExecutor>,
+
+    /// External harness discovery snapshot, independent of the API model catalog.
+    pub external_model_catalog: Option<Vec<ExternalModelMetadata>>,
 
     /// Size of the context window for the model, in tokens.
     pub model_context_window: Option<i64>,

@@ -471,7 +471,7 @@ async fn model_resolution_preserves_startup_overrides_and_instruction_provenance
             .get_model_info("model-b", &config.to_models_manager_config())
             .await;
         let resolved = settings
-            .resolve_model_info(&models_manager, &overrides)
+            .resolve_model_info(&config, &models_manager, &overrides)
             .await;
         assert_eq!(resolved, legacy);
         assert_eq!(

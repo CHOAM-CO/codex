@@ -1,5 +1,6 @@
 //! Configured inputs retained independently of future thread settings.
 
+use crate::config::Config;
 use crate::config::Constrained;
 use crate::config::ConstraintError;
 use crate::config::ConstraintResult;
@@ -125,6 +126,7 @@ impl ResolvedStepSettings {
         &self,
         update: &StepSettingsUpdate,
         constraints: &StepSettingsConstraints<'_>,
+        config: &Config,
         models_manager: &dyn ModelsManager,
         overrides: &ModelInfoOverrides,
         features: &Features,
@@ -134,7 +136,11 @@ impl ResolvedStepSettings {
             if selected.collaboration_mode.model() == self.selected.collaboration_mode.model() {
                 Arc::clone(&self.model_info)
             } else {
-                Arc::new(selected.resolve_model_info(models_manager, overrides).await)
+                Arc::new(
+                    selected
+                        .resolve_model_info(config, models_manager, overrides)
+                        .await,
+                )
             };
         let mut next = Self::new(Arc::new(selected), model_info, features);
         next.mcp_approvals_reviewer_override = update
@@ -240,13 +246,18 @@ impl StepSettings {
     /// Resolves the selected model using the session's explicit startup overrides.
     pub(super) async fn resolve_model_info(
         &self,
+        config: &Config,
         models_manager: &dyn ModelsManager,
         overrides: &ModelInfoOverrides,
     ) -> ModelInfo {
-        let config = overrides.models_manager_config(self.personality);
-        models_manager
-            .get_model_info(self.collaboration_mode.model(), &config)
-            .await
+        let overrides = overrides.models_manager_config(self.personality);
+        crate::model_metadata::resolve_model_info(
+            config,
+            models_manager,
+            self.collaboration_mode.model(),
+            &overrides,
+        )
+        .await
     }
 
     /// Applies edits and validates the result against the supplied constraints.

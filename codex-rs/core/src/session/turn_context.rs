@@ -1350,6 +1350,7 @@ impl Session {
         let model_info = session_configuration
             .step_settings
             .resolve_model_info(
+                &per_turn_config,
                 self.services.models_manager.as_ref(),
                 &session_configuration.model_info_overrides,
             )
@@ -1504,8 +1505,9 @@ impl Session {
                 .await;
         }
 
-        if let Some(message) =
-            unsupported_code_mode_warning(tc.model_info(), tc.config.features.get())
+        if tc.config.model_executor == codex_protocol::external_executor::ModelExecutor::Codex
+            && let Some(message) =
+                unsupported_code_mode_warning(tc.model_info(), tc.config.features.get())
         {
             self.send_event(tc, EventMsg::Warning(WarningEvent { message }))
                 .await;

@@ -673,6 +673,9 @@ pub struct Config {
     /// Backend responsible for model generation.
     pub model_executor: codex_protocol::external_executor::ModelExecutor,
 
+    /// External harness model discovery supplied by the host for this runtime.
+    pub external_model_catalog: Vec<codex_config::config_toml::ExternalModelMetadata>,
+
     /// Deprecated: `friendly` and `pragmatic` no longer select a style.
     pub personality: Option<Personality>,
 
@@ -4440,6 +4443,7 @@ impl Config {
             model_provider_id,
             model_provider,
             model_executor: cfg.model_executor.unwrap_or_default(),
+            external_model_catalog: cfg.external_model_catalog.unwrap_or_default(),
             cwd: resolved_cwd,
             workspace_roots: workspace_roots.clone(),
             workspace_roots_explicit,

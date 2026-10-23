@@ -122,12 +122,17 @@ pub(crate) async fn spawn(
         let child_model_info = match config.model.as_deref() {
             Some(model)
                 if model != turn.model_info().slug
-                    || config.model_provider != *turn.provider.info() =>
+                    || config.model_provider != *turn.provider.info()
+                    || config.model_executor != turn.config.model_executor =>
             {
                 Some(
-                    spawn_agent_models_manager(session, &config)
-                        .get_model_info(model, &config.to_models_manager_config())
-                        .await,
+                    crate::model_metadata::resolve_model_info(
+                        &config,
+                        spawn_agent_models_manager(session, &config).as_ref(),
+                        model,
+                        &config.to_models_manager_config(),
+                    )
+                    .await,
                 )
             }
             _ => None,

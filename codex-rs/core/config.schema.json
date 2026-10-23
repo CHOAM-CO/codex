@@ -1603,6 +1603,38 @@
       },
       "type": "object"
     },
+    "ExternalModelMetadata": {
+      "additionalProperties": false,
+      "description": "Discovered model metadata supplied by the external harness host.",
+      "properties": {
+        "display_name": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "multi_agent_reasoning_effort": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ReasoningEffort"
+            }
+          ],
+          "description": "Actual harness effort for Codex's Ultra orchestration mode, when known."
+        },
+        "supported_reasoning_efforts": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/ReasoningEffort"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "display_name",
+        "model"
+      ],
+      "type": "object"
+    },
     "FeatureToggleToml": {
       "additionalProperties": false,
       "description": "Optional enablement of a configured feature.",
@@ -7099,6 +7131,13 @@
     },
     "experimental_use_unified_exec_tool": {
       "type": "boolean"
+    },
+    "external_model_catalog": {
+      "description": "External harness discovery snapshot, independent of the API model catalog.",
+      "items": {
+        "$ref": "#/definitions/ExternalModelMetadata"
+      },
+      "type": "array"
     },
     "features": {
       "additionalProperties": false,

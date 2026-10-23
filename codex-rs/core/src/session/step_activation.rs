@@ -413,6 +413,7 @@ impl Session {
             .apply_update(
                 update,
                 &constraints,
+                &turn_context.config,
                 self.services.models_manager.as_ref(),
                 &overrides,
                 &self.features,

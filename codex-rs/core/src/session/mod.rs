@@ -804,9 +804,13 @@ impl Session {
         // 1. config.base_instructions override
         // 2. conversation history => session_meta.base_instructions
         // 3. rendered instructions_template for current model
-        let model_info = models_manager
-            .get_model_info(model.as_str(), &config.to_models_manager_config())
-            .await;
+        let model_info = crate::model_metadata::resolve_model_info(
+            &config,
+            models_manager.as_ref(),
+            model.as_str(),
+            &config.to_models_manager_config(),
+        )
+        .await;
         let auth = auth_manager.auth_cached();
         // Forked subagents keep their parent's activation with the copied history.
         // Fresh children restore configured preferences before applying startup defaults.
@@ -2196,6 +2200,7 @@ impl Session {
             let model = configuration
                 .step_settings
                 .resolve_model_info(
+                    &config,
                     self.services.models_manager.as_ref(),
                     &configuration.model_info_overrides,
                 )

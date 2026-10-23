@@ -13,19 +13,25 @@ pub(super) async fn spawn_review_thread(
         .review_model
         .clone()
         .unwrap_or_else(|| parent_turn_context.model_info().slug.clone());
-    let available_models = sess
-        .services
-        .models_manager
-        .list_models(
-            RefreshStrategy::OnlineIfUncached,
-            config.http_client_factory(),
-        )
-        .await;
-    let review_model_info = sess
-        .services
-        .models_manager
-        .get_model_info(&model, &config.to_models_manager_config())
-        .await;
+    let executor = parent_turn_context.config.model_executor;
+    let available_models = if executor == codex_protocol::external_executor::ModelExecutor::Codex {
+        sess.services
+            .models_manager
+            .list_models(
+                RefreshStrategy::OnlineIfUncached,
+                config.http_client_factory(),
+            )
+            .await
+    } else {
+        Vec::new()
+    };
+    let review_model_info = crate::model_metadata::resolve_model_info(
+        &parent_turn_context.config,
+        sess.services.models_manager.as_ref(),
+        &model,
+        &config.to_models_manager_config(),
+    )
+    .await;
     // For reviews, disable web_search and view_image regardless of global settings.
     let mut review_features = sess.features.clone();
     let _ = review_features.disable(Feature::WebSearchRequest);
@@ -44,6 +50,7 @@ pub(super) async fn spawn_review_thread(
     per_turn_config.token_budget = config.token_budget.clone();
     per_turn_config.features = review_features.clone();
     if let Some(current_effort) = reasoning_effort.as_ref()
+        && executor == codex_protocol::external_executor::ModelExecutor::Codex
         && review_model_info.slug != parent_turn_context.model_info().slug
         && !review_model_info.used_fallback_model_metadata
         && !review_model_info
