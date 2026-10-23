@@ -1016,12 +1016,7 @@ impl Session {
             }
         })?;
         if let Some(message) = initial_service_tier_warning {
-            session
-                .send_event_raw(Event {
-                    id: INITIAL_SUBMIT_ID.to_owned(),
-                    msg: EventMsg::Warning(WarningEvent { message }),
-                })
-                .await;
+            warn!("{message}");
         }
         let thread_id = session.thread_id;
 
