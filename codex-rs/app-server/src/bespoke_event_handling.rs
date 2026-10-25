@@ -974,6 +974,11 @@ pub(crate) async fn apply_bespoke_event_handling(
                 on_request_permissions_response(pending_response, conversation, thread_state).await;
             });
         }
+        EventMsg::ExternalExecutorSteer(params) => {
+            outgoing
+                .send_server_notification(ServerNotification::ExternalExecutorSteer(params))
+                .await;
+        }
         EventMsg::ExternalExecutorRequest(params) => {
             let turn_id = params.turn_id.clone();
             let run_id = params.run_id.clone();
@@ -984,17 +989,20 @@ pub(crate) async fn apply_bespoke_event_handling(
                 let result = match receiver.await {
                     Ok(Ok(value)) => serde_json::from_value(value).unwrap_or_else(|err| {
                         codex_protocol::external_executor::ExternalExecutorRunResponse {
+                            unattempted_steer_ids: Vec::new(),
                             success: false,
                             error: Some(format!("invalid external executor result: {err}")),
                         }
                     }),
                     Ok(Err(err)) => {
                         codex_protocol::external_executor::ExternalExecutorRunResponse {
+                            unattempted_steer_ids: Vec::new(),
                             success: false,
                             error: Some(format!("external executor request failed: {err:?}")),
                         }
                     }
                     Err(err) => codex_protocol::external_executor::ExternalExecutorRunResponse {
+                        unattempted_steer_ids: Vec::new(),
                         success: false,
                         error: Some(format!("external executor disconnected: {err}")),
                     },

@@ -2507,6 +2507,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<RealtimeEventTex
         | EventMsg::ImageGenerationBegin(_)
         | EventMsg::ImageGenerationEnd(_)
         | EventMsg::ViewImageToolCall(_)
+        | EventMsg::ExternalExecutorSteer(_)
         | EventMsg::ExternalExecutorRequest(_)
         | EventMsg::DynamicToolCallRequest(_)
         | EventMsg::DynamicToolCallResponse(_)

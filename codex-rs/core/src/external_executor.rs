@@ -7,9 +7,7 @@ use crate::session::turn::run_hooks_and_record_inputs_and_collect;
 use crate::session::turn_context::TurnContext;
 use crate::tools::parallel::ToolCallRuntime;
 use crate::turn_diff_tracker::TurnDiffTracker;
-use codex_history::{
-    CodexHarnessMetadata, ExternalExecutorToolMetadata, ResponseItemEnvelope,
-};
+use codex_history::{CodexHarnessMetadata, ExternalExecutorToolMetadata, ResponseItemEnvelope};
 use codex_protocol::error::{CodexErr, Result};
 use codex_protocol::external_executor::{
     ExternalExecutorContextUpdate, ExternalExecutorEvent, ExternalExecutorRunParams,
@@ -143,6 +141,7 @@ pub(crate) async fn run_external_turn(
         let active = active.as_ref().ok_or(CodexErr::TurnAborted)?;
         let mut state = active.turn_state.lock().await;
         state.external_run_id = Some(id.clone());
+        state.external_steering_closed = false;
         state.external_executor = Some(tx);
         state.external_tool_runtime = Some(runtime);
         state.external_cancellation = Some(request_cancel);
@@ -180,6 +179,35 @@ pub(crate) async fn run_external_turn(
             next = rx.recv() => next.ok_or_else(|| CodexErr::Fatal("external executor disconnected".into()))?,
         };
         match next {
+            ExternalMessage::Event(ExternalExecutorEvent::SteeringClose) => {
+                return Err(CodexErr::InvalidRequest(
+                    "steering close must use the admission boundary".into(),
+                ));
+            }
+            ExternalMessage::Event(ExternalExecutorEvent::SteerDelivered { steer_id }) => {
+                let input = {
+                    let active = session.active_turn.lock().await;
+                    match active.as_ref() {
+                        Some(active) => active
+                            .turn_state
+                            .lock()
+                            .await
+                            .in_flight_external_steer
+                            .shift_remove(&steer_id),
+                        None => None,
+                    }
+                };
+                if let Some(input) = input {
+                    run_hooks_and_record_inputs_and_collect(
+                        &session,
+                        &turn,
+                        &step.settings.model_info,
+                        &input,
+                        PersistContext::SteeredUserInput,
+                    )
+                    .await;
+                }
+            }
             ExternalMessage::Event(ExternalExecutorEvent::TextDelta { delta }) => {
                 if !started {
                     session
@@ -318,6 +346,34 @@ pub(crate) async fn run_external_turn(
                 }
             }
             ExternalMessage::Complete(result) => {
+                let attempted = {
+                    let active = session.active_turn.lock().await;
+                    let active = active.as_ref().ok_or(CodexErr::TurnAborted)?;
+                    let mut state = active.turn_state.lock().await;
+                    state.external_run_id = None;
+                    state.external_executor = None;
+                    let mut queued = Vec::new();
+                    let mut attempted = Vec::new();
+                    for (steer_id, input) in std::mem::take(&mut state.in_flight_external_steer) {
+                        if result.unattempted_steer_ids.contains(&steer_id) {
+                            queued.extend(input);
+                        } else {
+                            attempted.extend(input);
+                        }
+                    }
+                    state.pending_input.prepend(queued);
+                    attempted
+                };
+                if !attempted.is_empty() {
+                    run_hooks_and_record_inputs_and_collect(
+                        &session,
+                        &turn,
+                        &step.settings.model_info,
+                        &attempted,
+                        PersistContext::SteeredUserInput,
+                    )
+                    .await;
+                }
                 if started {
                     record_message(&session, &step, &id, text.clone(), result.success).await;
                     session
@@ -504,9 +560,26 @@ impl Session {
         turn_id: &str,
         run_id: &str,
         event: ExternalExecutorEvent,
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
+        if matches!(event, ExternalExecutorEvent::SteeringClose) {
+            let active = self.active_turn.lock().await;
+            let active = active.as_ref().ok_or(CodexErr::TurnAborted)?;
+            let task = active.task.as_ref().ok_or(CodexErr::TurnAborted)?;
+            if task.turn_context.sub_id != turn_id || task.cancellation_token.is_cancelled() {
+                return Err(CodexErr::TurnAborted);
+            }
+            let mut state = active.turn_state.lock().await;
+            if state.external_run_id.as_deref() != Some(run_id) {
+                return Err(CodexErr::InvalidRequest(
+                    "external run is no longer active".into(),
+                ));
+            }
+            state.external_steering_closed = true;
+            return Ok(state.in_flight_external_steer.keys().cloned().collect());
+        }
         self.send_external(turn_id, run_id, ExternalMessage::Event(event))
-            .await
+            .await?;
+        Ok(Vec::new())
     }
 
     pub(crate) async fn external_executor_complete(
@@ -574,7 +647,7 @@ impl CodexThread {
         turn_id: &str,
         run_id: &str,
         event: ExternalExecutorEvent,
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
         self.session
             .external_executor_event(turn_id, run_id, event)
             .await
@@ -657,6 +730,7 @@ mod tests {
                 &turn.sub_id,
                 &run_id,
                 ExternalExecutorRunResponse {
+                    unattempted_steer_ids: Vec::new(),
                     success: true,
                     error: None,
                 },
@@ -708,6 +782,140 @@ mod tests {
     }
 
     #[test]
+    fn steering_is_live_and_only_unattempted_input_starts_a_successor_run() {
+        run_test(|| async {
+            let (session, turn, rx, run_id) = setup().await;
+            let mut steering = Vec::new();
+            for text in ["delivered", "uncertain", "queued"] {
+                session
+                    .route_realtime_text_input(text.into())
+                    .await
+                    .expect("steer accepted");
+                loop {
+                    let event = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    if let EventMsg::ExternalExecutorSteer(params) = event.msg {
+                        assert_eq!(params.run_id, run_id);
+                        assert_eq!(params.turn_id, turn.sub_id);
+                        assert_eq!(params.thread_id, session.thread_id.to_string());
+                        assert_eq!(params.input.len(), 1);
+                        steering.push(params.steer_id);
+                        break;
+                    }
+                }
+            }
+            assert_ne!(steering[0], steering[1]);
+            assert_ne!(steering[1], steering[2]);
+            session
+                .external_executor_event(
+                    &turn.sub_id,
+                    &run_id,
+                    ExternalExecutorEvent::SteerDelivered {
+                        steer_id: steering[0].clone(),
+                    },
+                )
+                .await
+                .unwrap();
+            session
+                .external_executor_complete(
+                    &turn.sub_id,
+                    &run_id,
+                    ExternalExecutorRunResponse {
+                        success: true,
+                        error: None,
+                        unattempted_steer_ids: vec![steering[2].clone()],
+                    },
+                )
+                .await
+                .unwrap();
+            let successor = next_request(&rx).await;
+            assert_eq!(successor.turn_id, turn.sub_id);
+            assert_ne!(successor.run_id, run_id);
+            let content: Vec<_> = successor
+                .input
+                .iter()
+                .filter_map(|item| {
+                    if let ResponseItem::Message { role, content, .. } = item {
+                        (role == "user").then_some(content.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(content.len(), 1);
+            assert_eq!(
+                content[0],
+                vec![ContentItem::InputText {
+                    text: "queued".into()
+                }]
+            );
+            complete(&session, &turn, &successor.run_id).await;
+        });
+    }
+
+    #[test]
+    fn steering_close_fences_late_input_and_returns_ids_before_notification_consumption() {
+        run_test(|| async {
+            let (session, turn, rx, run_id) = setup().await;
+            session
+                .route_realtime_text_input("before-close".into())
+                .await
+                .unwrap();
+            // The adapter has not consumed the already emitted steering notification.
+            let admitted = session
+                .external_executor_event(
+                    &turn.sub_id,
+                    &run_id,
+                    ExternalExecutorEvent::SteeringClose,
+                )
+                .await
+                .unwrap();
+            assert_eq!(admitted.len(), 1);
+            session
+                .route_realtime_text_input("after-close".into())
+                .await
+                .unwrap();
+            session
+                .external_executor_complete(
+                    &turn.sub_id,
+                    &run_id,
+                    ExternalExecutorRunResponse {
+                        success: true,
+                        error: None,
+                        unattempted_steer_ids: admitted,
+                    },
+                )
+                .await
+                .unwrap();
+            let next = next_request(&rx).await;
+            let user_input: Vec<_> = next
+                .input
+                .iter()
+                .filter_map(|item| match item {
+                    ResponseItem::Message { role, content, .. } if role == "user" => {
+                        Some(content.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                user_input,
+                vec![
+                    vec![ContentItem::InputText {
+                        text: "before-close".into()
+                    }],
+                    vec![ContentItem::InputText {
+                        text: "after-close".into()
+                    }]
+                ]
+            );
+            complete(&session, &turn, &next.run_id).await;
+        });
+    }
+
+    #[test]
     fn external_text_becomes_native_message_history_and_completion() {
         run_test(|| async {
             let (session, turn, rx, run_id) = setup().await;
@@ -736,6 +944,7 @@ mod tests {
                     &turn.sub_id,
                     &run_id,
                     ExternalExecutorRunResponse {
+                        unattempted_steer_ids: Vec::new(),
                         success: true,
                         error: None,
                     },
@@ -802,6 +1011,7 @@ mod tests {
                     &turn.sub_id,
                     &run_id,
                     ExternalExecutorRunResponse {
+                        unattempted_steer_ids: Vec::new(),
                         success: true,
                         error: None,
                     },
@@ -953,6 +1163,7 @@ mod tests {
                         &turn.sub_id,
                         &first_run_id,
                         ExternalExecutorRunResponse {
+                            unattempted_steer_ids: Vec::new(),
                             success: true,
                             error: None
                         },
@@ -1136,6 +1347,7 @@ mod tests {
                         &first.sub_id,
                         &first_run_id,
                         ExternalExecutorRunResponse {
+                            unattempted_steer_ids: Vec::new(),
                             success: true,
                             error: None
                         },

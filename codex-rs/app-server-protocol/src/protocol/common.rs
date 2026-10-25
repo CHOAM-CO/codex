@@ -1966,6 +1966,7 @@ pub struct FuzzyFileSearchSessionCompletedNotification {
 }
 
 server_notification_definitions! {
+    ExternalExecutorSteer => "turn/external/steer" (v2::ExternalExecutorSteerParams),
     /// NEW NOTIFICATIONS
     Error => "error" (v2::ErrorNotification),
     ThreadStarted => "thread/started" (v2::ThreadStartedNotification),

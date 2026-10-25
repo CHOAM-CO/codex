@@ -168,6 +168,7 @@ fn persisted_event_msg(
         | EventMsg::CollabWaitingEnd(_)
         | EventMsg::CollabCloseEnd(_)
         | EventMsg::CollabResumeEnd(_)
+        | EventMsg::ExternalExecutorSteer(_)
         | EventMsg::ExternalExecutorRequest(_)
         | EventMsg::DynamicToolCallRequest(_)
         | EventMsg::DynamicToolCallResponse(_)

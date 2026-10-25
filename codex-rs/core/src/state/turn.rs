@@ -92,6 +92,8 @@ pub(crate) struct TurnState {
     pub(crate) external_tool_runtime: Option<crate::tools::parallel::ToolCallRuntime>,
     pub(crate) external_cancellation: Option<tokio_util::sync::CancellationToken>,
     pub(crate) external_run_id: Option<String>,
+    pub(crate) external_steering_closed: bool,
+    pub(crate) in_flight_external_steer: indexmap::IndexMap<String, Vec<crate::session::TurnInput>>,
     pub(crate) external_executor:
         Option<tokio::sync::mpsc::UnboundedSender<crate::external_executor::ExternalMessage>>,
     pending_approvals: HashMap<String, oneshot::Sender<ReviewDecision>>,

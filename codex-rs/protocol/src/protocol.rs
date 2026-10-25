@@ -1596,6 +1596,7 @@ pub enum EventMsg {
     RequestUserInput(RequestUserInputEvent),
 
     ExternalExecutorRequest(crate::external_executor::ExternalExecutorRunParams),
+    ExternalExecutorSteer(crate::external_executor::ExternalExecutorSteerParams),
 
     DynamicToolCallRequest(DynamicToolCallRequest),
 

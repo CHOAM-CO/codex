@@ -884,6 +884,54 @@ impl Session {
             }
         };
         pending_input.push(input);
+        {
+            let mut state = active_turn.turn_state.lock().await;
+            if let Some(run_id) = state.external_run_id.clone()
+                && !state.external_steering_closed
+            {
+                let forwarded = pending_input
+                    .iter()
+                    .map(|item| match item {
+                        TurnInput::UserInput { content, .. } => {
+                            Some(codex_protocol::models::ResponseItem::from(
+                                codex_protocol::models::ResponseInputItem::from(content.clone()),
+                            ))
+                        }
+                        TurnInput::ResponseItem(item) | TurnInput::FunctionCallOutput(item) => {
+                            Some(item.item.clone())
+                        }
+                        TurnInput::InterAgentCommunication(_) => None,
+                    })
+                    .collect::<Option<Vec<_>>>();
+                if let Some(input) = forwarded {
+                    let steer_id = Uuid::new_v4().to_string();
+                    state
+                        .in_flight_external_steer
+                        .insert(steer_id.clone(), pending_input);
+                    drop(state);
+                    self.send_event(
+                        &active_task.turn_context,
+                        EventMsg::ExternalExecutorSteer(
+                            codex_protocol::external_executor::ExternalExecutorSteerParams {
+                                thread_id: self.thread_id.to_string(),
+                                turn_id: active_turn_id.clone(),
+                                run_id,
+                                steer_id,
+                                input: codex_protocol::provider_history::without_encrypted_content(
+                                    &input,
+                                )
+                                .items,
+                            },
+                        ),
+                    )
+                    .await;
+                    return Ok((
+                        active_turn_id.clone(),
+                        active_task.turn_context.root_turn_id(),
+                    ));
+                }
+            }
+        }
         self.input_queue
             .extend_pending_input_and_accept_mailbox_delivery_for_turn_state(
                 active_turn.turn_state.as_ref(),

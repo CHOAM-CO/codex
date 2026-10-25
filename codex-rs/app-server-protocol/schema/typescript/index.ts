@@ -24,6 +24,7 @@ export type { ExternalExecutorContextUpdate } from "./ExternalExecutorContextUpd
 export type { ExternalExecutorEvent } from "./ExternalExecutorEvent";
 export type { ExternalExecutorRunParams } from "./ExternalExecutorRunParams";
 export type { ExternalExecutorRunResponse } from "./ExternalExecutorRunResponse";
+export type { ExternalExecutorSteerParams } from "./ExternalExecutorSteerParams";
 export type { FileChange } from "./FileChange";
 export type { ForcedLoginMethod } from "./ForcedLoginMethod";
 export type { FunctionCallOutputBody } from "./FunctionCallOutputBody";

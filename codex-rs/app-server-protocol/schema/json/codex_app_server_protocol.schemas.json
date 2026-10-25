@@ -3243,6 +3243,13 @@
         },
         "success": {
           "type": "boolean"
+        },
+        "unattemptedSteerIds": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -4806,6 +4813,26 @@
       "$schema": "http://json-schema.org/draft-07/schema#",
       "description": "Notification sent from the server to the client.",
       "oneOf": [
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "turn/external/steer"
+              ],
+              "title": "Turn/external/steerNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ExternalExecutorSteerParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Turn/external/steerNotification",
+          "type": "object"
+        },
         {
           "description": "NEW NOTIFICATIONS",
           "properties": {
@@ -12009,6 +12036,42 @@
         "oneOf": [
           {
             "properties": {
+              "type": {
+                "enum": [
+                  "steeringClose"
+                ],
+                "title": "SteeringCloseExternalExecutorEventType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "SteeringCloseExternalExecutorEvent",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "steerId": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "steer_delivered"
+                ],
+                "title": "SteerDeliveredExternalExecutorEventType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "steerId",
+              "type"
+            ],
+            "title": "SteerDeliveredExternalExecutorEvent",
+            "type": "object"
+          },
+          {
+            "properties": {
               "delta": {
                 "type": "string"
               },
@@ -12092,7 +12155,47 @@
       },
       "ExternalExecutorEventResponse": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "steerIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
         "title": "ExternalExecutorEventResponse",
+        "type": "object"
+      },
+      "ExternalExecutorSteerParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "input": {
+            "items": {
+              "$ref": "#/definitions/v2/ResponseItem"
+            },
+            "type": "array"
+          },
+          "runId": {
+            "type": "string"
+          },
+          "steerId": {
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string"
+          },
+          "turnId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "input",
+          "runId",
+          "steerId",
+          "threadId",
+          "turnId"
+        ],
+        "title": "ExternalExecutorSteerParams",
         "type": "object"
       },
       "FeedbackRequirements": {

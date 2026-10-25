@@ -2286,6 +2286,7 @@ mod tests {
                                 | "CollabCloseEndEvent"
                                 | "CollabResumeBeginEvent"
                                 | "CollabResumeEndEvent"
+                                | "ExternalExecutorEvent"
                         )
                 });
 

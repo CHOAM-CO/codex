@@ -683,6 +683,7 @@ mod thread_processor_behavior_tests {
             personality: None,
             exclude_turns: false,
             initial_turns_page: None,
+            dynamic_tools: None,
         };
         let config_snapshot = ThreadConfigSnapshot {
             model_executor: codex_protocol::external_executor::ModelExecutor::Antigravity,

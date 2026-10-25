@@ -103,12 +103,12 @@ impl McpRequestProcessor {
             )
             .await
             .map_err(|err| invalid_params(err.to_string()))?;
-        thread
+        let steer_ids = thread
             .external_executor_event(&params.turn_id, &params.run_id, params.event)
             .await
             .map_err(|err| invalid_params(err.to_string()))?;
         Ok(Some(
-            codex_app_server_protocol::ExternalExecutorEventResponse {}.into(),
+            codex_app_server_protocol::ExternalExecutorEventResponse { steer_ids }.into(),
         ))
     }
 

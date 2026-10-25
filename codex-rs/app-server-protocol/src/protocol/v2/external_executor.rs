@@ -1,7 +1,7 @@
 use crate::{JsonSchema, TS};
 use codex_protocol::external_executor::ExternalExecutorEvent;
 pub use codex_protocol::external_executor::{
-    ExternalExecutorRunParams, ExternalExecutorRunResponse,
+    ExternalExecutorRunParams, ExternalExecutorRunResponse, ExternalExecutorSteerParams,
 };
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
@@ -15,7 +15,11 @@ pub struct ExternalExecutorEventParams {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[ts(export_to = "v2/")]
-pub struct ExternalExecutorEventResponse {}
+#[serde(rename_all = "camelCase")]
+pub struct ExternalExecutorEventResponse {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steer_ids: Vec<String>,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]

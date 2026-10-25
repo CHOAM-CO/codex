@@ -9,6 +9,13 @@
     },
     "success": {
       "type": "boolean"
+    },
+    "unattemptedSteerIds": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
     }
   },
   "required": [

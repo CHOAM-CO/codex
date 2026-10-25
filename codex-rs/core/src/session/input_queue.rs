@@ -460,6 +460,11 @@ impl InputQueue {
 }
 
 impl TurnInputQueue {
+    pub(crate) fn prepend(&mut self, mut input: Vec<TurnInput>) {
+        input.append(&mut self.items);
+        self.items = input;
+    }
+
     fn has_user_input(&self) -> bool {
         self.items
             .iter()

@@ -107,9 +107,13 @@ impl SessionTask for RegularTask {
                     next_input,
                     cancellation_token.child_token(),
                 )
-                .await?;
+                .await;
                 if !sess.input_queue.has_pending_input(&sess.active_turn).await {
-                    return Ok(result);
+                    return result;
+                }
+                if let Err(error) = result {
+                    let message = error.to_string();
+                    sess.notify_stream_error(&ctx, message, error).await;
                 }
                 next_input = sess
                     .input_queue

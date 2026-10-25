@@ -42,6 +42,8 @@ pub struct ExternalExecutorContextUpdate {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ExternalExecutorRunResponse {
+    #[serde(default)]
+    pub unattempted_steer_ids: Vec<String>,
     pub success: bool,
     pub error: Option<String>,
 }
@@ -49,6 +51,12 @@ pub struct ExternalExecutorRunResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ExternalExecutorEvent {
+    SteeringClose,
+    #[serde(rename = "steer_delivered")]
+    SteerDelivered {
+        #[serde(rename = "steerId")]
+        steer_id: String,
+    },
     TextDelta {
         delta: String,
     },
@@ -82,4 +90,14 @@ where
     D: serde::Deserializer<'de>,
 {
     serde_json::Value::deserialize(deserializer).map(Some)
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalExecutorSteerParams {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub run_id: String,
+    pub steer_id: String,
+    pub input: Vec<ResponseItem>,
 }

@@ -3922,7 +3922,12 @@ impl ThreadRequestProcessor {
             personality,
             exclude_turns,
             initial_turns_page,
+            dynamic_tools,
         } = params.clone();
+        let dynamic_tools = dynamic_tools.unwrap_or_default();
+        if !dynamic_tools.is_empty() {
+            validate_dynamic_tools(&dynamic_tools).map_err(invalid_request)?;
+        }
         let include_turns = !exclude_turns;
 
         let resume_result = if let Some(history) = history {
@@ -4211,6 +4216,7 @@ impl ThreadRequestProcessor {
                     ThreadResumeTarget::DaemonRecovery(_) => None,
                 },
                 client_mcp_extensions,
+                dynamic_tools,
                 ..StartThreadOptions::new(config)
             })
             .await
@@ -5140,7 +5146,12 @@ impl ThreadRequestProcessor {
             thread_source,
             exclude_turns,
             defer_goal_continuation,
+            dynamic_tools,
         } = params;
+        let dynamic_tools = dynamic_tools.unwrap_or_default();
+        if !dynamic_tools.is_empty() {
+            validate_dynamic_tools(&dynamic_tools).map_err(invalid_request)?;
+        }
         let include_turns = !exclude_turns;
         if sandbox.is_some() && permissions.is_some() {
             return Err(invalid_request(
@@ -5475,12 +5486,15 @@ impl ThreadRequestProcessor {
             .await?
         };
 
-        let fork_options = StartThreadOptions {
+        let mut fork_options = StartThreadOptions {
             thread_source,
             parent_trace,
             reserved_thread_id,
             ..options
         };
+        if !dynamic_tools.is_empty() {
+            fork_options.dynamic_tools = dynamic_tools;
+        }
         let new_thread = if let Some(prepared_fork) = prepared_fork {
             self.thread_manager
                 .fork_prepared_thread(fork_options, prepared_fork)

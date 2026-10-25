@@ -445,6 +445,14 @@ pub struct ThreadResumeParams {
     #[experimental("thread/resume.initialTurnsPage")]
     #[ts(optional = nullable)]
     pub initial_turns_page: Option<ThreadResumeInitialTurnsPageParams>,
+    #[experimental("thread/resume.dynamicTools")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "codex_protocol::dynamic_tools::deserialize_dynamic_tool_specs"
+    )]
+    #[ts(optional = nullable)]
+    pub dynamic_tools: Option<Vec<DynamicToolSpec>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
@@ -653,6 +661,14 @@ pub struct ThreadForkParams {
     #[experimental("thread/fork.deferGoalContinuation")]
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub defer_goal_continuation: bool,
+    #[experimental("thread/fork.dynamicTools")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "codex_protocol::dynamic_tools::deserialize_dynamic_tool_specs"
+    )]
+    #[ts(optional = nullable)]
+    pub dynamic_tools: Option<Vec<DynamicToolSpec>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
@@ -2195,4 +2211,41 @@ pub struct ThreadQueueChangedNotification {
 pub struct ContextCompactedNotification {
     pub thread_id: String,
     pub turn_id: String,
+}
+
+#[cfg(test)]
+mod dynamic_tool_param_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn thread_resume_and_fork_params_deserialize_dynamic_tools() {
+        let tool_spec = json!([{
+            "name": "discord_send_message",
+            "description": "Send a Discord message",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "content": { "type": "string" }
+                },
+                "additionalProperties": false
+            }
+        }]);
+
+        let resume: ThreadResumeParams = serde_json::from_value(json!({
+            "threadId": "thread-1",
+            "excludeTurns": true,
+            "dynamicTools": tool_spec
+        }))
+        .expect("resume params with dynamicTools");
+        assert_eq!(resume.dynamic_tools.as_ref().map(Vec::len), Some(1));
+
+        let fork: ThreadForkParams = serde_json::from_value(json!({
+            "threadId": "thread-1",
+            "excludeTurns": true,
+            "dynamicTools": tool_spec
+        }))
+        .expect("fork params with dynamicTools");
+        assert_eq!(fork.dynamic_tools.as_ref().map(Vec::len), Some(1));
+    }
 }

@@ -1201,6 +1201,42 @@
       "oneOf": [
         {
           "properties": {
+            "type": {
+              "enum": [
+                "steeringClose"
+              ],
+              "title": "SteeringCloseExternalExecutorEventType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "SteeringCloseExternalExecutorEvent",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "steerId": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "steer_delivered"
+              ],
+              "title": "SteerDeliveredExternalExecutorEventType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "steerId",
+            "type"
+          ],
+          "title": "SteerDeliveredExternalExecutorEvent",
+          "type": "object"
+        },
+        {
+          "properties": {
             "delta": {
               "type": "string"
             },
